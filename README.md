@@ -11,7 +11,9 @@
 
 **划词 → 收藏 → 回顾 → 导出，四步闭环：**
 
-![ClipKeep 演示](docs/demo.gif)
+![ClipKeep 演示：划词高亮批注 → 一键收藏 → 每日回顾 → 导出与备份](docs/demo.gif)
+
+> 动图为界面示意（mockup）。生成脚本在 `docs/gen_demo_gif.py`，欢迎用真实录屏替换并提交 PR。
 
 ---
 
