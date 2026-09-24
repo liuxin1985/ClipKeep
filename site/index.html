@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ClipKeep · 跨浏览器轻量划词收藏插件</title>
+<meta name="description" content="ClipKeep：跨 Chrome / Edge / Safari 的轻量划词收藏插件。一键划词存本地、导出 Markdown、净化网页阅读。零账号、纯本地、无后端、不上传任何数据。" />
+<meta property="og:title" content="ClipKeep · 划词即存，导出即用" />
+<meta property="og:description" content="跨浏览器轻量划词收藏插件，零账号、纯本地、无后端。" />
+<meta property="og:image" content="demo.gif" />
+<meta property="og:type" content="website" />
+<link rel="icon" href="icon.png" />
+<style>
+  :root{
+    --blue:#2563eb; --blue-d:#1d4ed8; --ink:#0f172a; --muted:#64748b;
+    --bg:#ffffff; --soft:#f5f7fb; --line:#e6e9f0; --card:#ffffff;
+    --radius:16px; --maxw:1080px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --ink:#e5e7eb; --muted:#94a3b8; --bg:#0b1020; --soft:#0f172a;
+      --line:#1e293b; --card:#111a2e; }
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    color:var(--ink); background:var(--bg); line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 22px}
+  /* nav */
+  header{position:sticky;top:0;z-index:20;backdrop-filter:saturate(180%) blur(10px);
+    background:color-mix(in srgb,var(--bg) 82%, transparent);border-bottom:1px solid var(--line)}
+  nav{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .logo{display:flex;align-items:center;gap:9px;font-weight:800;font-size:19px}
+  .logo .star{color:var(--blue)}
+  .nav-links{display:flex;gap:26px;font-size:15px;color:var(--muted)}
+  .nav-links a:hover{color:var(--ink)}
+  .gh-btn{display:inline-flex;align-items:center;gap:8px;background:var(--ink);color:var(--bg);
+    padding:8px 14px;border-radius:10px;font-size:14px;font-weight:600}
+  @media(max-width:720px){.nav-links{display:none}}
+  /* hero */
+  .hero{text-align:center;padding:78px 0 40px}
+  .badge{display:inline-flex;gap:8px;align-items:center;font-size:13px;color:var(--blue);
+    background:color-mix(in srgb,var(--blue) 10%, transparent);border:1px solid color-mix(in srgb,var(--blue) 25%, transparent);
+    padding:6px 14px;border-radius:999px;font-weight:600}
+  .hero h1{font-size:clamp(34px,6vw,58px);line-height:1.12;font-weight:900;margin:22px 0 16px;letter-spacing:-.5px}
+  .hero h1 .g{background:linear-gradient(90deg,var(--blue),#7c3aed);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{font-size:clamp(16px,2.4vw,20px);color:var(--muted);max-width:640px;margin:0 auto}
+  .cta{display:flex;gap:14px;justify-content:center;margin-top:30px;flex-wrap:wrap}
+  .btn{padding:13px 24px;border-radius:12px;font-weight:700;font-size:16px;transition:.15s}
+  .btn-primary{background:var(--blue);color:#fff}
+  .btn-primary:hover{background:var(--blue-d);transform:translateY(-1px)}
+  .btn-ghost{border:1px solid var(--line);background:var(--card)}
+  .btn-ghost:hover{border-color:var(--blue);color:var(--blue)}
+  /* demo */
+  .demo{margin:46px auto 0;max-width:920px}
+  .demo img{width:100%;border-radius:var(--radius);border:1px solid var(--line);
+    box-shadow:0 30px 60px -25px rgba(37,99,235,.35);display:block}
+  /* sections */
+  section{padding:64px 0}
+  .sec-title{text-align:center;font-size:clamp(24px,4vw,34px);font-weight:800;margin-bottom:10px}
+  .sec-sub{text-align:center;color:var(--muted);margin-bottom:44px;font-size:16px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+  @media(max-width:820px){.grid{grid-template-columns:1fr 1fr}}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .feat{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:26px;transition:.15s}
+  .feat:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--blue) 40%,var(--line));box-shadow:0 16px 34px -22px rgba(2,6,23,.4)}
+  .feat .ico{font-size:26px;width:52px;height:52px;display:grid;place-items:center;border-radius:13px;
+    background:color-mix(in srgb,var(--blue) 12%,transparent);margin-bottom:16px}
+  .feat h3{font-size:18px;margin-bottom:8px}
+  .feat p{color:var(--muted);font-size:15px}
+  /* steps */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;counter-reset:s}
+  @media(max-width:720px){.steps{grid-template-columns:1fr}}
+  .step{position:relative;padding:26px;background:var(--soft);border-radius:var(--radius);border:1px solid var(--line)}
+  .step .n{counter-increment:s;width:38px;height:38px;border-radius:50%;background:var(--blue);color:#fff;
+    display:grid;place-items:center;font-weight:800;margin-bottom:14px}
+  .step .n::before{content:counter(s)}
+  .step h4{font-size:17px;margin-bottom:6px}
+  .step p{color:var(--muted);font-size:15px}
+  /* browsers */
+  .browsers{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:8px}
+  .bchip{border:1px solid var(--line);background:var(--card);border-radius:12px;padding:14px 22px;font-weight:600;display:flex;gap:9px;align-items:center}
+  /* install */
+  .install{background:var(--ink);color:#e5e7eb;border-radius:var(--radius);padding:26px 28px;max-width:760px;margin:0 auto;font-size:14.5px}
+  .install code{display:block;white-space:pre;overflow:auto;font-family:"SFMono-Regular",Consolas,monospace;color:#a5f3fc;line-height:1.9}
+  .install .c{color:#94a3b8}
+  /* footer */
+  footer{border-top:1px solid var(--line);padding:34px 0;text-align:center;color:var(--muted);font-size:14px}
+  footer a{color:var(--blue);font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="logo"><span class="star">★</span> ClipKeep</div>
+      <div class="nav-links">
+        <a href="#features">功能</a>
+        <a href="#how">用法</a>
+        <a href="#install">安装</a>
+        <a href="#faq">FAQ</a>
+      </div>
+      <a class="gh-btn" href="https://github.com/liuxin1985/ClipKeep" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.68-.01-1.34-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        Star
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <span class="badge">零账号 · 纯本地 · 跨三浏览器</span>
+    <h1>划词即存，<span class="g">导出即用</span></h1>
+    <p>ClipKeep 是一款跨 Chrome / Edge / Safari 的轻量划词收藏插件。选中文字一键存本地，导出 Markdown，还能净化网页专心阅读。不联网、不上传、开箱即用。</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/liuxin1985/ClipKeep" target="_blank" rel="noopener">★ 在 GitHub 获取</a>
+      <a class="btn btn-ghost" href="#install">3 步安装</a>
+    </div>
+    <div class="demo"><img src="demo.gif" alt="ClipKeep 划词收藏演示" loading="lazy" /></div>
+  </div>
+
+  <section id="features">
+    <h2 class="sec-title">为高效留存而生</h2>
+    <p class="sec-sub">学生整理网课重点、上班族积累周报素材，一个插件全搞定。</p>
+    <div class="grid">
+      <div class="feat"><div class="ico">✂️</div><h3>划词收藏</h3><p>选中任意文字，浮动条一键收藏，可加备注与标签，不打断阅读。</p></div>
+      <div class="feat"><div class="ico">🔒</div><h3>纯本地存储</h3><p>数据全存在浏览器本地，无账号、无后端、永不上传，隐私零妥协。</p></div>
+      <div class="feat"><div class="ico">📝</div><h3>导出 Markdown</h3><p>单条或批量导出 .md，无缝归档到 Obsidian / Notion / GitHub。</p></div>
+      <div class="feat"><div class="ico">📖</div><h3>净化阅读</h3><p>一键移除广告、侧边栏、导航，只留正文，还能整页收藏。</p></div>
+      <div class="feat"><div class="ico">🏷️</div><h3>标签分类</h3><p>给收藏打标签、按标签筛选、全文搜索，多也不乱。</p></div>
+      <div class="feat"><div class="ico">🌙</div><h3>深色模式</h3><p>明暗主题随心切换，偏好本地记忆，夜间护眼。</p></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2 class="sec-title">三步用起来</h2>
+    <p class="sec-sub">无需注册，装上即用。</p>
+    <div class="steps">
+      <div class="step"><div class="n"></div><h4>划选文字</h4><p>在任意网页选中你想留存的内容。</p></div>
+      <div class="step"><div class="n"></div><h4>点「★ 收藏」</h4><p>浮动条或右键菜单一键保存到本地，可加备注标签。</p></div>
+      <div class="step"><div class="n"></div><h4>导出 / 复用</h4><p>打开弹窗搜索、筛选、复制，或批量导出 Markdown。</p></div>
+    </div>
+    <div class="browsers" style="margin-top:38px">
+      <span class="bchip">🌐 Chrome</span>
+      <span class="bchip">🧩 Edge</span>
+      <span class="bchip">🧭 Safari 16.4+</span>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2 class="sec-title">安装</h2>
+    <p class="sec-sub">开发者模式加载已解压的扩展，无需构建。</p>
+    <div class="install"><code><span class="c"># 1. 获取代码</span>
+git clone https://github.com/liuxin1985/ClipKeep.git
+
+<span class="c"># 2. 打开 chrome://extensions（Edge 为 edge://extensions）</span>
+<span class="c">#    右上角开启「开发者模式」</span>
+
+<span class="c"># 3. 点「加载已解压的扩展程序」→ 选择 ClipKeep/extension 目录</span>
+<span class="c">#    工具栏出现 ★ 即成功 🎉</span></code></div>
+  </section>
+
+  <section id="faq">
+    <h2 class="sec-title">常见问题</h2>
+    <p class="sec-sub">
+      更多问题欢迎提 <a href="https://github.com/liuxin1985/ClipKeep/issues" target="_blank" rel="noopener">Issue</a>。
+    </p>
+    <div class="grid" style="grid-template-columns:1fr">
+      <div class="feat"><h3>数据会上传吗？</h3><p>不会。ClipKeep 纯本地离线运行，无任何网络请求，卸载前请自行导出备份。</p></div>
+      <div class="feat"><h3>为什么某些页面划词没反应？</h3><p>浏览器安全限制：<code>chrome://</code>、扩展商店页等不会注入脚本，属正常现象。</p></div>
+      <div class="feat"><h3>能跨设备同步吗？</h3><p>暂不含云端同步（保持零后端）。可在路线图上关注，欢迎点 Star 催更 ⭐。</p></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>ClipKeep · MIT License · 零账号，纯本地，跨浏览器</p>
+    <p style="margin-top:6px">觉得有用？<a href="https://github.com/liuxin1985/ClipKeep" target="_blank" rel="noopener">给个 Star ⭐</a> 是最好的支持。</p>
+  </div>
+</footer>
+</body>
+</html>
