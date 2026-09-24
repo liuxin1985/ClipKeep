@@ -143,3 +143,16 @@
 .clipkeep-reader-body blockquote {
   margin: 1em 0; padding: 0.4em 1em; border-left: 4px solid #d1cfc8; color: #57534e;
 }
+
+/* 划词高亮 / 批注 */
+.clipkeep-hl {
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+  cursor: pointer;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition: box-shadow 0.12s ease;
+}
+.clipkeep-hl:hover { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.4); }
+.clipkeep-hl.has-note { border-bottom: 2px dotted rgba(0, 0, 0, 0.35); }

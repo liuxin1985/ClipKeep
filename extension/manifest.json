@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClipKeep",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "跨浏览器轻量划词收藏插件：一键划词存本地、导出 Markdown、净化网页阅读。零账号、纯本地、无后端。",
   "author": "ClipKeep",
   "permissions": ["storage", "contextMenus", "activeTab", "scripting"],

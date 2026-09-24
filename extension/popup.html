@@ -20,27 +20,43 @@
       </div>
     </header>
 
-    <section class="toolbar">
-      <input id="search" type="search" placeholder="搜索收藏内容…" />
-      <select id="sort" title="排序">
-        <option value="new">最新优先</option>
-        <option value="old">最早优先</option>
-      </select>
-    </section>
+    <nav class="tabs">
+      <button class="tab active" data-view="clips">📌 收藏</button>
+      <button class="tab" data-view="review">🔁 回顾 <span class="due" id="due" hidden></span></button>
+    </nav>
 
-    <section class="tags" id="tags"></section>
+    <!-- 收藏视图 -->
+    <div id="view-clips" class="view">
+      <section class="toolbar">
+        <input id="search" type="search" placeholder="搜索收藏内容…" />
+        <select id="sort" title="排序">
+          <option value="new">最新优先</option>
+          <option value="old">最早优先</option>
+        </select>
+      </section>
+      <section class="tags" id="tags"></section>
+      <main class="list" id="list">
+        <div class="empty" id="empty">
+          <div class="empty-ico">★</div>
+          <p>还没有收藏</p>
+          <span>在网页上划选文字，点「收藏」即可留存到这里。</span>
+        </div>
+      </main>
+    </div>
 
-    <main class="list" id="list">
-      <div class="empty" id="empty">
-        <div class="empty-ico">★</div>
-        <p>还没有收藏</p>
-        <span>在网页上划选文字，点「收藏」即可留存到这里。</span>
-      </div>
-    </main>
+    <!-- 回顾视图 -->
+    <div id="view-review" class="view" hidden>
+      <div class="review" id="review"></div>
+    </div>
 
     <footer class="app-footer">
       <span class="tip">零账号 · 纯本地 · 跨浏览器</span>
-      <button id="btn-clear" class="link-btn">清空全部</button>
+      <div class="foot-actions">
+        <button id="btn-backup" class="link-btn" title="导出全部为 JSON 备份">备份</button>
+        <button id="btn-restore" class="link-btn" title="从 JSON 备份恢复">恢复</button>
+        <button id="btn-clear" class="link-btn danger">清空全部</button>
+      </div>
+      <input id="file" type="file" accept="application/json,.json" hidden />
     </footer>
 
     <div class="toast" id="toast"></div>

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install test-only deps (jsdom)
+        run: npm ci --omit=optional
+
+      - name: Syntax check extension scripts
+        run: npm run check
+
+      - name: Manifests are valid JSON
+        run: |
+          node -e "for (const f of ['extension/manifest.json','extension/manifest.safari.json']) { const m=JSON.parse(require('fs').readFileSync(f,'utf8')); if(m.manifest_version!==3) throw new Error(f+' not MV3'); console.log(f, m.name, m.version); }"
+
+      - name: Extension bundle has no runtime dependencies
+        run: |
+          node -e "
+          const fs=require('fs');
+          const bad=/<script[^>]+src=[\"']https?:|<link[^>]+href=[\"']https?:/.exec(fs.readFileSync('extension/popup.html','utf8'));
+          if (bad) { console.error('CDN reference found:', bad[0]); process.exit(1); }
+          console.log('OK: popup.html is fully offline');
+          "
+
+      - name: Run behaviour tests (jsdom)
+        run: npm test

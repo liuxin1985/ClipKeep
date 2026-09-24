@@ -115,7 +115,7 @@
   <div class="hero">
     <span class="badge">零账号 · 纯本地 · 跨三浏览器</span>
     <h1>划词即存，<span class="g">导出即用</span></h1>
-    <p>ClipKeep 是一款跨 Chrome / Edge / Safari 的轻量划词收藏插件。选中文字一键存本地，导出 Markdown，还能净化网页专心阅读。不联网、不上传、开箱即用。</p>
+    <p>ClipKeep 是一款跨 Chrome / Edge / Safari 的轻量划词收藏插件。选中文字一键存本地、涂高亮写批注，到期自动提醒你回顾，还能导出 Markdown、净化网页专心阅读。不联网、不上传、开箱即用。</p>
     <div class="cta">
       <a class="btn btn-primary" href="https://github.com/liuxin1985/ClipKeep" target="_blank" rel="noopener">★ 在 GitHub 获取</a>
       <a class="btn btn-ghost" href="#install">3 步安装</a>
@@ -128,6 +128,9 @@
     <p class="sec-sub">学生整理网课重点、上班族积累周报素材，一个插件全搞定。</p>
     <div class="grid">
       <div class="feat"><div class="ico">✂️</div><h3>划词收藏</h3><p>选中任意文字，浮动条一键收藏，可加备注与标签，不打断阅读。</p></div>
+      <div class="feat"><div class="ico">🖍️</div><h3>高亮 + 批注</h3><p>在原文上涂四色高亮、写下批注，刷新页面自动重放，点一下就能改或删除。</p></div>
+      <div class="feat"><div class="ico">🔁</div><h3>每日回顾</h3><p>内置 Leitner 间隔重复，到期内容自动排队，忘记/记得/简单三档评分，收藏不再只进不出。</p></div>
+      <div class="feat"><div class="ico">💾</div><h3>JSON 备份</h3><p>收藏与高亮一键导出成单个文件，换浏览器导入即恢复，按 id 合并不会覆盖已有数据。</p></div>
       <div class="feat"><div class="ico">🔒</div><h3>纯本地存储</h3><p>数据全存在浏览器本地，无账号、无后端、永不上传，隐私零妥协。</p></div>
       <div class="feat"><div class="ico">📝</div><h3>导出 Markdown</h3><p>单条或批量导出 .md，无缝归档到 Obsidian / Notion / GitHub。</p></div>
       <div class="feat"><div class="ico">📖</div><h3>净化阅读</h3><p>一键移除广告、侧边栏、导航，只留正文，还能整页收藏。</p></div>
@@ -142,7 +145,7 @@
     <div class="steps">
       <div class="step"><div class="n"></div><h4>划选文字</h4><p>在任意网页选中你想留存的内容。</p></div>
       <div class="step"><div class="n"></div><h4>点「★ 收藏」</h4><p>浮动条或右键菜单一键保存到本地，可加备注标签。</p></div>
-      <div class="step"><div class="n"></div><h4>导出 / 复用</h4><p>打开弹窗搜索、筛选、复制，或批量导出 Markdown。</p></div>
+      <div class="step"><div class="n"></div><h4>回顾 / 复用</h4><p>弹窗里搜索筛选、按「🔁 回顾」温习到期内容，或导出 Markdown 与 JSON 备份。</p></div>
     </div>
     <div class="browsers" style="margin-top:38px">
       <span class="bchip">🌐 Chrome</span>
@@ -170,9 +173,10 @@ git clone https://github.com/liuxin1985/ClipKeep.git
       更多问题欢迎提 <a href="https://github.com/liuxin1985/ClipKeep/issues" target="_blank" rel="noopener">Issue</a>。
     </p>
     <div class="grid" style="grid-template-columns:1fr">
-      <div class="feat"><h3>数据会上传吗？</h3><p>不会。ClipKeep 纯本地离线运行，无任何网络请求，卸载前请自行导出备份。</p></div>
+      <div class="feat"><h3>数据会上传吗？</h3><p>不会。ClipKeep 纯本地离线运行，无任何网络请求。卸载前点弹窗底部「备份」导出 JSON 即可。</p></div>
       <div class="feat"><h3>为什么某些页面划词没反应？</h3><p>浏览器安全限制：<code>chrome://</code>、扩展商店页等不会注入脚本，属正常现象。</p></div>
-      <div class="feat"><h3>能跨设备同步吗？</h3><p>暂不含云端同步（保持零后端）。可在路线图上关注，欢迎点 Star 催更 ⭐。</p></div>
+      <div class="feat"><h3>能跨设备同步吗？</h3><p>不做云同步（保持零后端），但可以用「备份 / 恢复」在两三分钟内在另一台电脑导入，收藏与高亮一次带走。</p></div>
+      <div class="feat"><h3>高亮会随页面改版丢失吗？</h3><p>高亮按文字内容匹配，重开页面自动重放；若原文被大幅改写导致文本不再连续，该处高亮会暂时不显示，数据仍在备份里。</p></div>
     </div>
   </section>
 </main>
