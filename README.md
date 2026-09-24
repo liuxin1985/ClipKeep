@@ -3,7 +3,8 @@
 > **零账号 · 纯本地 · 跨浏览器** 的轻量划词收藏插件。
 
 [![Live Demo](https://img.shields.io/badge/🌐_在线演示-ClipKeep-2563eb?style=for-the-badge)](https://liuxin1985.github.io/ClipKeep/)
-[![version](https://img.shields.io/badge/version-1.1.0-16a34a)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.1.0-16a34a)](https://github.com/liuxin1985/ClipKeep/releases/latest)
+[![download zip](https://img.shields.io/badge/⬇_下载_zip-解压即用-0f766e)](https://github.com/liuxin1985/ClipKeep/releases/latest)
 
 在任意网页划选文字 → 一键存本地 → 高亮批注 → 每日回顾 → 导出 Markdown → 净化阅读。
 学生整理网课重点、上班族留存周报素材，开箱即用，无后端、无广告、不上传任何数据。
@@ -28,7 +29,7 @@
 
 ##  快速开始（3 步）
 
-1. 下载 / clone 本仓库。
+1. [下载最新 Release 的 zip](https://github.com/liuxin1985/ClipKeep/releases/latest) 解压（或 clone 本仓库）。
 2. 打开 `chrome://extensions`，右上角开启 **开发者模式**。
 3. 点 **加载已解压的扩展程序**，选择 `extension/` 目录。
 
