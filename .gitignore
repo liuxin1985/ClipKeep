@@ -15,3 +15,6 @@ node_modules/
 # Safari 转换生成物
 _build/
 *.xcodeproj/
+
+# 本地授权备忘，绝不提交
+LOCAL-AUTH.md
