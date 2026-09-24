@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ClipKeep</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="logo">★</span>
+        <span class="name">ClipKeep</span>
+        <span class="count" id="count">0</span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-reader" class="icon-btn" title="净化阅读当前页">📖</button>
+        <button id="btn-theme" class="icon-btn" title="切换深色模式">🌙</button>
+        <button id="btn-export" class="icon-btn" title="导出全部为 Markdown">⬇</button>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <input id="search" type="search" placeholder="搜索收藏内容…" />
+      <select id="sort" title="排序">
+        <option value="new">最新优先</option>
+        <option value="old">最早优先</option>
+      </select>
+    </section>
+
+    <section class="tags" id="tags"></section>
+
+    <main class="list" id="list">
+      <div class="empty" id="empty">
+        <div class="empty-ico">★</div>
+        <p>还没有收藏</p>
+        <span>在网页上划选文字，点「收藏」即可留存到这里。</span>
+      </div>
+    </main>
+
+    <footer class="app-footer">
+      <span class="tip">零账号 · 纯本地 · 跨浏览器</span>
+      <button id="btn-clear" class="link-btn">清空全部</button>
+    </footer>
+
+    <div class="toast" id="toast"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

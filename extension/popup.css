@@ -1,0 +1,118 @@
+/* ClipKeep popup — 清爽卡片风，支持深色模式 */
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #111827;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #2563eb;
+  --accent-soft: #eff6ff;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+body.dark {
+  --bg: #0f1115;
+  --card: #1a1d24;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --border: #2a2f3a;
+  --accent: #3b82f6;
+  --accent-soft: #1e293b;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  width: 380px;
+  max-height: 600px;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; background: var(--card); border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.logo { color: var(--accent); font-size: 18px; }
+.name { font-weight: 700; font-size: 16px; }
+.count {
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+}
+.header-actions { display: flex; gap: 4px; }
+.icon-btn {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 16px; width: 30px; height: 30px; border-radius: 8px; line-height: 1;
+}
+.icon-btn:hover { background: var(--accent-soft); color: var(--accent); }
+
+.toolbar { display: flex; gap: 8px; padding: 10px 14px 4px; }
+.toolbar input[type="search"] {
+  flex: 1; border: 1px solid var(--border); background: var(--card); color: var(--text);
+  border-radius: 8px; padding: 7px 10px; font-size: 13px;
+}
+.toolbar select {
+  border: 1px solid var(--border); background: var(--card); color: var(--text);
+  border-radius: 8px; padding: 7px 8px; font-size: 13px;
+}
+
+.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px; }
+.tags:empty { display: none; }
+.chip {
+  border: 1px solid var(--border); background: var(--card); color: var(--muted);
+  font-size: 12px; padding: 2px 10px; border-radius: 999px; cursor: pointer;
+}
+.chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.list { flex: 1; overflow-y: auto; padding: 4px 14px 12px; }
+.empty { text-align: center; color: var(--muted); padding: 48px 20px; }
+.empty-ico { font-size: 34px; color: var(--border); margin-bottom: 8px; }
+.empty p { margin: 0 0 4px; font-weight: 600; color: var(--text); }
+.empty span { font-size: 12px; }
+
+.item {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px; margin-bottom: 10px; box-shadow: var(--shadow);
+}
+.item-text { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+.item-note {
+  margin-top: 6px; font-size: 12px; color: var(--muted);
+  border-left: 3px solid var(--accent-soft); padding-left: 8px; white-space: pre-wrap;
+}
+.item-meta {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 11px; color: var(--muted);
+}
+.item-meta .tag { background: var(--accent-soft); color: var(--accent); padding: 1px 7px; border-radius: 999px; }
+.item-meta a { color: var(--muted); text-decoration: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-meta a:hover { color: var(--accent); }
+.item-actions { display: flex; gap: 6px; margin-top: 10px; }
+.mini-btn {
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  font-size: 12px; padding: 4px 10px; border-radius: 7px; cursor: pointer;
+}
+.mini-btn:hover { border-color: var(--accent); color: var(--accent); }
+.mini-btn.danger:hover { border-color: #ef4444; color: #ef4444; }
+
+.app-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-top: 1px solid var(--border); background: var(--card);
+}
+.tip { font-size: 11px; color: var(--muted); }
+.link-btn { border: none; background: none; color: var(--muted); font-size: 12px; cursor: pointer; }
+.link-btn:hover { color: #ef4444; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 56px; transform: translateX(-50%) translateY(10px);
+  background: rgba(17, 24, 39, 0.92); color: #fff; font-size: 13px;
+  padding: 8px 16px; border-radius: 999px; opacity: 0; pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
