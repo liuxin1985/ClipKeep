@@ -2,6 +2,8 @@
 
 > **零账号 · 纯本地 · 跨浏览器** 的轻量划词收藏插件。
 
+[![Live Demo](https://img.shields.io/badge/🌐_在线演示-ClipKeep-2563eb?style=for-the-badge)](https://liuxin1985.github.io/ClipKeep/)
+
 在任意网页划选文字 → 一键存本地 → 导出 Markdown → 净化阅读。
 学生整理网课重点、上班族留存周报素材，开箱即用，无后端、无广告、不上传任何数据。
 
