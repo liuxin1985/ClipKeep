@@ -3,15 +3,15 @@
 > **零账号 · 纯本地 · 跨浏览器** 的轻量划词收藏插件。
 
 [![Live Demo](https://img.shields.io/badge/🌐_在线演示-ClipKeep-2563eb?style=for-the-badge)](https://liuxin1985.github.io/ClipKeep/)
-[![version](https://img.shields.io/badge/version-1.1.0-16a34a)](https://github.com/liuxin1985/ClipKeep/releases/latest)
+[![version](https://img.shields.io/badge/version-1.2.0-16a34a)](https://github.com/liuxin1985/ClipKeep/releases/latest)
 [![download zip](https://img.shields.io/badge/⬇_下载_zip-解压即用-0f766e)](https://github.com/liuxin1985/ClipKeep/releases/latest)
 
 在任意网页划选文字 → 一键存本地 → 高亮批注 → 每日回顾 → 导出 Markdown → 净化阅读。
 学生整理网课重点、上班族留存周报素材，开箱即用，无后端、无广告、不上传任何数据。
 
-**划词 → 收藏 → 回顾 → 导出，四步闭环：**
+**划词 → 高亮批注 → 收藏 → 回顾 → 整理标签 → 备份导出，一条链走完：**
 
-![ClipKeep 演示：划词高亮批注 → 一键收藏 → 每日回顾 → 导出与备份](docs/demo.gif)
+![ClipKeep 演示：划词高亮批注 → 一键收藏 → 每日回顾 → 标签管理 / 设置 / 恢复差异 / 快捷键秒存](docs/demo.gif)
 
 > 动图为界面示意（mockup）。生成脚本在 `docs/gen_demo_gif.py`，欢迎用真实录屏替换并提交 PR。
 
@@ -23,8 +23,13 @@
 - **纯本地离线**：所有数据存在浏览器 `storage.local`，永不离开你的设备。
 - **跨三浏览器**：Chrome / Edge / Safari 16.4+ 全支持（同一套代码 + Safari 适配层）。
 - **划词高亮 + 原文批注**：在网页上直接涂色、写批注，下次打开自动重放，点击即可修改或删除。
-- **每日回顾**：内置 Leitner 间隔重复（0/1/3/7/21/90 天），收藏不再只进不出。
-- **JSON 备份 / 恢复**：换电脑、换浏览器一键迁移，按 id 合并不会覆盖本地数据。
+- **每日回顾**：内置 Leitner 间隔重复（0/1/3/7/21/90 天），收藏不再只进不出；
+  每日上限与间隔倍率都可在 ⚙ 设置里调。
+- **JSON 备份 / 恢复**：换电脑、换浏览器一键迁移；导入前先给你看差异
+  （新增 / 相同 / 仅本地），再选「合并」「覆盖本地」或「取消」。
+- **标签管理面板**：🏷 一键查看每个标签的数量，重命名、合并、删除批量生效。
+- **搜索命中高亮**：关键词在正文、备注与来源标题里直接标黄，一眼定位。
+- **快捷键秒存**：选中文字按 `Alt+Shift+K`，不用右键、不用点按钮。
 - **导出 Markdown**：单条或批量导出，方便归档到 Obsidian / Notion / GitHub。
 - **净化阅读**：一键移除广告、侧边栏、导航，只留正文。
 - **标签分类 + 深色模式 + 一键复制**：高频小功能全覆盖。
@@ -44,11 +49,14 @@
 | 划词收藏 | 选中文字 → 浮动条点「★ 收藏」→（可加备注/标签）保存 |
 | 划词高亮 | 选中文字 → 浮动条点「🖍」→ 页面即刻涂色，刷新后自动恢复 |
 | 原文批注 | 选中文字 → 浮动条点「✎」→ 写批注（粉色高亮）；点击已有高亮可改可删（输入 `d` 删除） |
+| 快捷键秒存 | 选中文字 → 按 `Alt+Shift+K`，直接入库（未选中会提示） |
 | 每日回顾 | 弹窗切到「🔁 回顾」→ 看题干 →「显示答案」→ 忘记 / 记得 / 简单，自动排下次时间 |
-| 备份 / 恢复 | 弹窗底部「备份」导出 JSON；「恢复」选择该文件按 id 合并回本地 |
+| 回顾设置 | 弹窗右上 ⚙ → 调「每日上限」1–200 与「间隔倍率」0.5× / 1× / 2× |
+| 标签管理 | 弹窗工具栏 🏷 → 每行可重命名 / 合并 / 删除，数量实时显示 |
+| 备份 / 恢复 | 弹窗底部「备份」导出 JSON；「恢复」选文件 → 看差异 → 合并 / 覆盖本地 / 取消 |
 | 右键收藏 | 选中文字 → 右键 → 「ClipKeep：收藏选中内容」 |
 | 净化阅读 | 浮动条点「阅读」/ 右键「净化阅读本页」/ 弹窗 📖 |
-| 查看/搜索/筛选 | 点工具栏图标打开弹窗 |
+| 查看/搜索/筛选 | 点工具栏图标打开弹窗，关键词命中标黄 |
 | 导出 | 弹窗右上 ⬇ 导出全部，或单条「导出」 |
 | 深色模式 | 弹窗右上 🌙 / ☀️ 切换 |
 
@@ -69,7 +77,7 @@ ClipKeep/
 │   ├── ci/workflow-test.yml   # 拷到 .github/workflows/ 即开启 CI
 │   └── demo.gif
 ├── test/
-│   └── clipkeep.test.mjs      # 58 项断言：消息路由 / 间隔重复 / 备份恢复 / 高亮重放
+│   └── clipkeep.test.mjs      # 132 项断言：消息路由 / 快捷键 / 标签管理 / 间隔重复 / 备份恢复 / 高亮重放
 └── extension/              # 可直接加载的插件目录
     ├── manifest.json          # MV3（Chrome / Edge）
     ├── manifest.safari.json   # Safari 适配清单
@@ -91,7 +99,7 @@ ClipKeep/
 ```bash
 npm install     # 只装 jsdom，用于测试
 npm run check   # 语法检查三个 JS 文件
-npm test        # 在 jsdom 里跑真实 popup/content/background，58 项断言
+npm test        # 在 jsdom 里跑真实 popup/content/background，132 项断言
 ```
 
 CI 配置随仓库提供：把 `docs/ci/workflow-test.yml` 复制为 `.github/workflows/test.yml` 推送，
@@ -103,7 +111,9 @@ CI 配置随仓库提供：把 `docs/ci/workflow-test.yml` 复制为 `.github/wo
 - **Day 8–18 核心迭代 ✅**：Markdown 单条/批量导出、净化阅读模式、Safari tab 权限适配。
 - **Day 19–30 吸星小更新 ✅**：标签分类、深色模式、一键复制、Issue 维护。
 - **v1.1 复利更新 ✅**：划词高亮 + 原文批注、每日回顾（间隔重复）、JSON 备份/恢复。
-- **v1.2 规划中**：全文搜索加权、导出模板自定义、跨设备手动同步（导入冲突提示）、CI 校验。
+- **v1.2 效率打磨 ✅（当前）**：标签管理面板、搜索命中高亮、回顾设置（上限 + 倍率）、
+  恢复差异预览与「合并 / 覆盖 / 取消」、`Alt+Shift+K` 秒存选区。
+- **v1.3 规划中**：导出模板自定义、图片与链接剪藏、回顾热力图统计、英文 UI、真实录屏替换示意动图。
 
 完整拆解与每阶段 AI 开发 Prompt 见 [docs/clipkeep-dev-plan.md](docs/clipkeep-dev-plan.md)。
 

@@ -24,7 +24,7 @@
 ```bash
 npm install     # 只装 jsdom（devDependency）
 npm run check   # node --check 语法校验
-npm test        # 58 项断言：消息路由 / Leitner 排期 / 备份恢复往返 / 高亮重放与删除
+npm test        # 132 项断言：消息路由 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 / 高亮重放与删除
 ```
 
 新增功能请顺带在 `test/clipkeep.test.mjs` 补几条断言；不确定怎么加可以在 Issue 里说，我们帮你写。
@@ -45,10 +45,11 @@ npm test        # 58 项断言：消息路由 / Leitner 排期 / 备份恢复往
 
 ## 好上手的第一批 Issue
 
-- 标签管理面板（重命名 / 合并）。
-- 回顾每日数量上限设置。
-- 高亮颜色选择器（目前固定四色）。
+- 高亮颜色选择器（目前固定四色，🏷 面板与设置面板可作参考实现）。
+- 导出模板自定义（标题格式、是否带来源、front-matter）。
+- 回顾统计热力图（每天复习了几张卡，数据已在 `clipkeep_review` 里）。
 - 更多站点的净化阅读提取规则。
+- 真实录屏替换 `docs/demo.gif` 的示意动图（生成脚本 `docs/gen_demo_gif.py`）。
 
 ## 提交信息
 

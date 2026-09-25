@@ -129,13 +129,16 @@
     <div class="grid">
       <div class="feat"><div class="ico">✂️</div><h3>划词收藏</h3><p>选中任意文字，浮动条一键收藏，可加备注与标签，不打断阅读。</p></div>
       <div class="feat"><div class="ico">🖍️</div><h3>高亮 + 批注</h3><p>在原文上涂四色高亮、写下批注，刷新页面自动重放，点一下就能改或删除。</p></div>
-      <div class="feat"><div class="ico">🔁</div><h3>每日回顾</h3><p>内置 Leitner 间隔重复，到期内容自动排队，忘记/记得/简单三档评分，收藏不再只进不出。</p></div>
-      <div class="feat"><div class="ico">💾</div><h3>JSON 备份</h3><p>收藏与高亮一键导出成单个文件，换浏览器导入即恢复，按 id 合并不会覆盖已有数据。</p></div>
+      <div class="feat"><div class="ico">🔁</div><h3>每日回顾</h3><p>内置 Leitner 间隔重复，到期内容自动排队，忘记/记得/简单三档评分；每日上限与间隔倍率都能自己调。</p></div>
+      <div class="feat"><div class="ico">💾</div><h3>JSON 备份</h3><p>收藏与高亮一键导出成单个文件，导入前先给你看差异，再选合并 / 覆盖 / 取消，不会误删本地数据。</p></div>
       <div class="feat"><div class="ico">🔒</div><h3>纯本地存储</h3><p>数据全存在浏览器本地，无账号、无后端、永不上传，隐私零妥协。</p></div>
       <div class="feat"><div class="ico">📝</div><h3>导出 Markdown</h3><p>单条或批量导出 .md，无缝归档到 Obsidian / Notion / GitHub。</p></div>
       <div class="feat"><div class="ico">📖</div><h3>净化阅读</h3><p>一键移除广告、侧边栏、导航，只留正文，还能整页收藏。</p></div>
-      <div class="feat"><div class="ico">🏷️</div><h3>标签分类</h3><p>给收藏打标签、按标签筛选、全文搜索，多也不乱。</p></div>
+      <div class="feat"><div class="ico">🏷️</div><h3>标签管理</h3><p>打标签、按标签筛选，还能在 🏷 面板里重命名、合并、删除，一次批量整理干净。</p></div>
+      <div class="feat"><div class="ico">🎯</div><h3>命中高亮</h3><p>搜索关键词在正文、备注、来源标题里直接标黄，几百条收藏也能一眼定位。</p></div>
+      <div class="feat"><div class="ico">⚡</div><h3>快捷键秒存</h3><p>选中文字按 <code>Alt+Shift+K</code> 直接入库，不用右键、不用抬手点按钮。</p></div>
       <div class="feat"><div class="ico">🌙</div><h3>深色模式</h3><p>明暗主题随心切换，偏好本地记忆，夜间护眼。</p></div>
+      <div class="feat"><div class="ico">🧑‍💻</div><h3>零构建开源</h3><p>MIT 协议、原生 JS、无运行时依赖，改完刷新即生效；132 项自动化测试守住每一次提交。</p></div>
     </div>
   </section>
 
@@ -156,7 +159,7 @@
 
   <section id="install">
     <h2 class="sec-title">安装</h2>
-    <p class="sec-sub">开发者模式加载已解压的扩展，无需构建。当前版本 v1.1.0。</p>
+    <p class="sec-sub">开发者模式加载已解压的扩展，无需构建。当前版本 v1.2.0。</p>
     <div class="install"><code><span class="c"># 1. 获取代码</span>
 git clone https://github.com/liuxin1985/ClipKeep.git
 
@@ -178,6 +181,9 @@ git clone https://github.com/liuxin1985/ClipKeep.git
       <div class="feat"><h3>为什么某些页面划词没反应？</h3><p>浏览器安全限制：<code>chrome://</code>、扩展商店页等不会注入脚本，属正常现象。</p></div>
       <div class="feat"><h3>能跨设备同步吗？</h3><p>不做云同步（保持零后端），但可以用「备份 / 恢复」在两三分钟内在另一台电脑导入，收藏与高亮一次带走。</p></div>
       <div class="feat"><h3>高亮会随页面改版丢失吗？</h3><p>高亮按文字内容匹配，重开页面自动重放；若原文被大幅改写导致文本不再连续，该处高亮会暂时不显示，数据仍在备份里。</p></div>
+      <div class="feat"><h3>Alt+Shift+K 没反应？</h3><p>快捷键可能被系统或其他扩展占用，可在 <code>chrome://extensions/shortcuts</code> 换一个组合键；受限页面（<code>chrome://</code>、扩展商店）本来就不注入脚本。</p></div>
+      <div class="feat"><h3>恢复会覆盖我本地的数据吗？</h3><p>不会默认覆盖。导入前先列出「新增 / 相同 / 仅本地」的差异，你选 <b>合并</b>（推荐，按 id 幂等）、<b>覆盖本地</b>（会再确认一次），或直接 <b>取消</b>。</p></div>
+      <div class="feat"><h3>每天回顾的量太大怎么办？</h3><p>弹窗右上 ⚙ 里把「每日上限」调小（最少 1 张），或用「间隔倍率」2× 把下次复习排得更远；设置只影响后续排期，不改收藏内容。</p></div>
     </div>
   </section>
 </main>

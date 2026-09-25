@@ -1,6 +1,6 @@
 {
   "name": "clipkeep",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "ClipKeep 扩展的自动化测试与开发脚本（扩展本身零依赖、纯原生 JS）",
   "type": "module",

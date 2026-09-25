@@ -1,7 +1,8 @@
 /**
  * ClipKeep - popup 逻辑
- * 收藏列表 / 搜索 / 标签筛选 / 排序 / 复制 / 删除 / Markdown 导出 / 深色模式
- * + 回顾（Leitner 间隔重复）+ JSON 备份 / 恢复。
+ * 收藏列表 / 搜索（命中高亮）/ 标签筛选与标签管理 / 排序 / 复制 / 删除 / Markdown 导出 / 深色模式
+ * + 回顾（Leitner 间隔重复，可调每日上限与间隔倍率）
+ * + JSON 备份 / 恢复（合并或覆盖本地）。
  */
 (() => {
   const API = (typeof browser !== "undefined" && browser.runtime) ? browser : chrome;
@@ -10,22 +11,28 @@
   const PREFS_KEY = "clipkeep_prefs";
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
+  const DEFAULT_PREFS = { review: { cap: 20, mult: 1 } };
 
   const $ = (id) => document.getElementById(id);
   const listEl = $("list");
   const emptyEl = $("empty");
   const countEl = $("count");
   const tagsEl = $("tags");
+  const tagboxEl = $("tagbox");
   const searchEl = $("search");
   const sortEl = $("sort");
   const toastEl = $("toast");
   const dueEl = $("due");
   const reviewEl = $("review");
+  const settingsEl = $("settings");
+  const modalEl = $("modal");
 
   let items = [];
+  let prefs = DEFAULT_PREFS;
   let activeTag = "";
   let view = "clips";
   let toastTimer = null;
+  let pendingRestore = null;
 
   function toast(msg) {
     toastEl.textContent = msg;
@@ -40,6 +47,23 @@
       .replace(/"/g, "&quot;");
   }
 
+  // 转义正则元字符，保证按字面量搜索
+  function reEsc(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /** 先按 HTML 转义，再把命中的关键词包进 <mark class="hit"> */
+  function hit(text, query) {
+    const safe = esc(text);
+    const q = query.trim();
+    if (!q) return safe;
+    try {
+      return safe.replace(new RegExp(reEsc(esc(q)), "gi"), (m) => `<mark class="hit">${m}</mark>`);
+    } catch (_) {
+      return safe;
+    }
+  }
+
   function fmtDate(ts) {
     const d = new Date(ts);
     const p = (n) => String(n).padStart(2, "0");
@@ -52,6 +76,13 @@
 
   /* ---------- 复习调度（Leitner 盒） ---------- */
 
+  function reviewPrefs() {
+    const r = (prefs && prefs.review) || {};
+    const cap = Math.max(1, Math.min(200, Number(r.cap) || DEFAULT_PREFS.review.cap));
+    const mult = [0.5, 1, 2].indexOf(Number(r.mult)) >= 0 ? Number(r.mult) : DEFAULT_PREFS.review.mult;
+    return { cap, mult };
+  }
+
   function ensureReview(it) {
     if (!it.review || typeof it.review.box !== "number") {
       it.review = { box: 0, due: it.createdAt || Date.now(), seen: 0 };
@@ -63,13 +94,20 @@
     if (g === 0) r.box = 0;                 // 忘记 → 回到盒 0
     else if (g === 1) r.box = Math.min(r.box + 1, INTERVALS.length - 1); // 记得 → 升 1
     else r.box = Math.min(r.box + 2, INTERVALS.length - 1);              // 简单 → 升 2
-    r.due = Date.now() + INTERVALS[r.box] * DAY;
+    const { mult } = reviewPrefs();
+    r.due = Date.now() + Math.round(INTERVALS[r.box] * DAY * mult);
     r.seen = (r.seen || 0) + 1;
     return it;
   }
   function dueItems() {
     const now = Date.now();
-    return items.filter((it) => ensureReview(it).due <= now);
+    return items
+      .filter((it) => ensureReview(it).due <= now)
+      .sort((a, b) => ensureReview(a).due - ensureReview(b).due);
+  }
+  /** 今日队列 = 到期内容按最早优先，截断到每日上限 */
+  function queue() {
+    return dueItems().slice(0, reviewPrefs().cap);
   }
 
   /* ---------- 数据加载 ---------- */
@@ -77,8 +115,23 @@
   async function load() {
     const obj = await API.storage.local.get([STORAGE_KEY, PREFS_KEY]);
     items = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
-    const prefs = obj[PREFS_KEY] || {};
+    prefs = obj[PREFS_KEY] || {};
     applyTheme(prefs.dark ? "dark" : "light");
+    syncSettings();
+    render();
+  }
+
+  function syncSettings() {
+    const { cap, mult } = reviewPrefs();
+    $("set-cap").value = String(cap);
+    $("set-mult").value = String(mult);
+  }
+
+  async function saveReviewPrefs(patch) {
+    prefs = { ...prefs, review: { ...reviewPrefs(), ...patch } };
+    prefs = { ...prefs, review: reviewPrefs() }; // 统一走同一套夹取规则再落盘
+    await API.storage.local.set({ [PREFS_KEY]: prefs });
+    syncSettings();
     render();
   }
 
@@ -130,8 +183,14 @@
   function render() {
     countEl.textContent = String(items.length);
     const due = dueItems().length;
-    if (due > 0) { dueEl.hidden = false; dueEl.textContent = due; }
-    else dueEl.hidden = true;
+    const queued = Math.min(due, reviewPrefs().cap);
+    if (queued > 0) {
+      dueEl.hidden = false;
+      dueEl.textContent = due > queued ? `${queued}/${due}` : String(queued);
+      dueEl.title = due > queued ? `每日上限 ${queued} 条，剩余 ${due - queued} 条明天继续` : "今日待回顾";
+    } else {
+      dueEl.hidden = true;
+    }
 
     if (view === "review") renderReview();
     else renderClips();
@@ -139,6 +198,7 @@
 
   function renderClips() {
     renderTags();
+    renderTagbox();
     const arr = filtered();
     listEl.querySelectorAll(".item").forEach((n) => n.remove());
     if (arr.length === 0) {
@@ -159,14 +219,15 @@
   }
 
   function itemNode(it) {
+    const q = searchEl.value;
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
     const link = it.url
       ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || hostname(it.url))}</a>`
       : "";
-    const note = it.note ? `<div class="item-note">${esc(it.note)}</div>` : "";
+    const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
     return `
       <div class="item" data-id="${it.id}">
-        <div class="item-text">${esc(it.text)}</div>
+        <div class="item-text">${hit(it.text, q)}</div>
         ${note}
         <div class="item-meta">${tags}${link}<span>${fmtDate(it.createdAt)}</span></div>
         <div class="item-actions">
@@ -178,25 +239,101 @@
       </div>`;
   }
 
+  /* ---------- 标签管理面板 ---------- */
+
+  function tagCounts() {
+    const map = new Map();
+    items.forEach((it) =>
+      (it.tags || []).forEach((t) => map.set(t, (map.get(t) || 0) + 1))
+    );
+    return [...map.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }
+
+  function renderTagbox() {
+    if (tagboxEl.hidden) return;
+    const rows = tagCounts();
+    if (!rows.length) {
+      tagboxEl.innerHTML = `<p class="tagbox-empty">还没有标签。给收藏「加标签」后就能在这里重命名、合并或删除。</p>`;
+      return;
+    }
+    tagboxEl.innerHTML = rows
+      .map(
+        ([t, n]) => `
+        <div class="tagrow" data-tag="${esc(t)}">
+          <span class="tagname">#${esc(t)}</span>
+          <span class="tagnum">${n}</span>
+          <span class="tagops">
+            <button class="mini-btn" data-act="t-rename">重命名</button>
+            <button class="mini-btn" data-act="t-merge">合并到…</button>
+            <button class="mini-btn danger" data-act="t-del">删除</button>
+          </span>
+        </div>`
+      )
+      .join("");
+  }
+
+  async function applyTagOp(from, to) {
+    const res = await API.runtime.sendMessage({ type: "clipkeep:tag-op", payload: { from, to } });
+    if (!res || !res.ok) return toast("操作失败");
+    if (activeTag === from) activeTag = to || "";
+    await load();
+    toast(to ? `已更新 ${res.changed} 条（${to === from ? "无变化" : "#" + from + " → #" + to}）` : `已从 ${res.changed} 条中删除 #${from}`);
+  }
+
+  tagboxEl.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-act]");
+    if (!btn) return;
+    const row = e.target.closest(".tagrow");
+    if (!row) return;
+    const from = row.dataset.tag;
+    const act = btn.dataset.act;
+    if (act === "t-rename") {
+      const to = prompt("把标签重命名为：", from);
+      if (to !== null && to.trim() && to.trim() !== from) await applyTagOp(from, to.trim());
+    } else if (act === "t-merge") {
+      const others = tagCounts().map(([t]) => t).filter((t) => t !== from);
+      const to = prompt("把 #" + from + " 合并到哪个标签？\n现有标签：" + (others.join("、") || "（无）"), others[0] || "");
+      if (to !== null && to.trim() && to.trim() !== from) await applyTagOp(from, to.trim());
+    } else if (act === "t-del") {
+      if (confirm(`从所有收藏中删除 #${from}？（不会删除内容本身）`)) await applyTagOp(from, "");
+    }
+  });
+
+  $("btn-tags").addEventListener("click", () => {
+    tagboxEl.hidden = !tagboxEl.hidden;
+    $("btn-tags").classList.toggle("active", !tagboxEl.hidden);
+    renderTagbox();
+  });
+
+  $("btn-settings").addEventListener("click", () => {
+    settingsEl.hidden = !settingsEl.hidden;
+    $("btn-settings").classList.toggle("active", !settingsEl.hidden);
+  });
+  $("set-cap").addEventListener("change", (e) => saveReviewPrefs({ cap: Number(e.target.value) }));
+  $("set-mult").addEventListener("change", (e) => saveReviewPrefs({ mult: Number(e.target.value) }));
+
   /* ---------- 回顾视图 ---------- */
 
   function renderReview() {
+    const { cap } = reviewPrefs();
     const due = dueItems();
+    const queued = queue();
     if (!items.length) {
       reviewEl.innerHTML = `<div class="empty"><div class="empty-ico">🔁</div><p>还没有可回顾的内容</p><span>先去网页上划词收藏几条吧。</span></div>`;
       return;
     }
-    if (!due.length) {
+    if (!queued.length) {
       const next = items.map((it) => ensureReview(it).due).sort((a, b) => a - b)[0];
       reviewEl.innerHTML = `<div class="empty done"><div class="empty-ico">🎉</div><p>今日回顾已完成</p><span>下一条将在 ${fmtDate(next)} 到期。明天再来 ~</span></div>`;
       return;
     }
-    const it = due[0];
+    const it = queued[0];
     const r = ensureReview(it);
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
     const link = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title || hostname(it.url))}</a>` : "";
+    const capNote = due.length > queued.length ? ` · 今日上限 ${cap} 条，剩余 ${due.length - queued.length} 条明天继续` : "";
     reviewEl.innerHTML = `
-      <div class="rev-progress">待回顾 ${due.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}</div>
+      <div class="rev-progress">本组待回顾 ${queued.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}${capNote}</div>
       <div class="rev-card" data-id="${it.id}">
         <div class="rev-front">${esc(it.text)}</div>
         <div class="rev-back" hidden>
@@ -362,37 +499,93 @@
     };
   }
 
+  const hlKeyOf = (h) => h.id || (h.url + "|" + h.text + "|" + h.createdAt);
+
   async function restore(file) {
+    let data;
     try {
-      const text = await file.text();
-      const data = JSON.parse(text);
-      const inItems = Array.isArray(data.items) ? data.items.map(normalizeItem).filter(Boolean) : [];
-      const inHl = Array.isArray(data.highlights) ? data.highlights.filter((h) => h && h.text && h.url) : [];
-      if (!inItems.length && !inHl.length) return toast("备份文件为空或格式不符");
-
-      const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY]);
-      const curItems = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
-      const curHl = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
-
-      // 按 id 合并，保留本地已有，新增缺失
-      const itemMap = new Map(curItems.map((x) => [x.id, x]));
-      let addI = 0;
-      inItems.forEach((x) => { if (!itemMap.has(x.id)) { itemMap.set(x.id, x); addI++; } });
-      const mergedItems = [...itemMap.values()].sort((a, b) => b.createdAt - a.createdAt);
-
-      const hlKey = (h) => h.id || (h.url + "|" + h.text + "|" + h.createdAt);
-      const hlMap = new Map(curHl.map((x) => [hlKey(x), x]));
-      let addH = 0;
-      inHl.forEach((x) => { if (!hlMap.has(hlKey(x))) { hlMap.set(hlKey(x), x); addH++; } });
-      const mergedHl = [...hlMap.values()];
-
-      await API.storage.local.set({ [STORAGE_KEY]: mergedItems, [HL_KEY]: mergedHl });
-      await load();
-      toast(`恢复完成：新增 ${addI} 收藏 · ${addH} 高亮`);
-    } catch (e) {
-      toast("恢复失败：文件解析错误");
+      data = JSON.parse(await file.text());
+    } catch (_) {
+      return toast("恢复失败：文件解析错误");
     }
+    const inItems = Array.isArray(data.items) ? data.items.map(normalizeItem).filter(Boolean) : [];
+    const inHl = Array.isArray(data.highlights) ? data.highlights.filter((h) => h && h.text && h.url) : [];
+    if (!inItems.length && !inHl.length) return toast("备份文件为空或格式不符");
+
+    const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY]);
+    const curItems = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
+    const curHl = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
+    const inIds = new Set(inItems.map((x) => x.id));
+    const curIds = new Set(curItems.map((x) => x.id));
+    const curHlKeys = new Set(curHl.map(hlKeyOf));
+    const plan = {
+      addItems: inItems.filter((x) => !curIds.has(x.id)),
+      sameItems: inItems.length - inItems.filter((x) => !curIds.has(x.id)).length,
+      localOnly: curItems.filter((x) => !inIds.has(x.id)),
+      addHl: inHl.filter((x) => !curHlKeys.has(hlKeyOf(x))),
+      sameHl: inHl.length - inHl.filter((x) => !curHlKeys.has(hlKeyOf(x))).length,
+      inItems,
+      inHl,
+      curItems,
+      curHl,
+    };
+    if (!plan.addItems.length && !plan.addHl.length && plan.sameItems === curItems.length) {
+      return toast("备份与本地一致，无需恢复");
+    }
+    pendingRestore = plan;
+    openRestoreModal(plan);
   }
+
+  function openRestoreModal(p) {
+    $("modal-title").textContent = "恢复备份 · 差异确认";
+    $("modal-body").innerHTML = `
+      <ul class="diff">
+        <li><b class="add">+${p.addItems.length}</b> 条备份里的新收藏</li>
+        <li><b class="same">${p.sameItems}</b> 条两边已有（保留本地版本）</li>
+        <li><b class="local">${p.localOnly.length}</b> 条仅存在于本地${p.localOnly.length ? "（覆盖会丢失）" : ""}</li>
+        <li><b class="add">+${p.addHl.length}</b> 条新高亮 · ${p.sameHl} 条已存在</li>
+      </ul>
+      <p class="diff-hint">合并：只补新内容，不动本地；覆盖本地：以备份为准（备份里没有的类别保留本地）。</p>`;
+    modalEl.hidden = false;
+  }
+
+  function closeRestoreModal() {
+    modalEl.hidden = true;
+    pendingRestore = null;
+  }
+
+  async function writeBoth(itemsArr, hlArr) {
+    await API.runtime.sendMessage({ type: "clipkeep:replace", payload: { items: itemsArr } });
+    await API.storage.local.set({ [HL_KEY]: hlArr });
+  }
+
+  $("modal-cancel").addEventListener("click", closeRestoreModal);
+  modalEl.addEventListener("click", (e) => {
+    if (e.target === modalEl) closeRestoreModal();
+  });
+  $("modal-ok").addEventListener("click", async () => {
+    if (!pendingRestore) return;
+    const p = pendingRestore;
+    const map = new Map(p.curItems.map((x) => [x.id, x]));
+    p.addItems.forEach((x) => map.set(x.id, x));
+    const mergedItems = [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
+    const hmap = new Map(p.curHl.map((x) => [hlKeyOf(x), x]));
+    p.addHl.forEach((x) => hmap.set(hlKeyOf(x), x));
+    await writeBoth(mergedItems, [...hmap.values()]);
+    closeRestoreModal();
+    await load();
+    toast(`已合并：新增 ${p.addItems.length} 收藏 · ${p.addHl.length} 高亮`);
+  });
+  $("modal-alt").addEventListener("click", async () => {
+    if (!pendingRestore) return;
+    const p = pendingRestore;
+    if (p.localOnly.length && !confirm(`备份里没有这 ${p.localOnly.length} 条本地内容，覆盖后将丢失。继续？`)) return;
+    const itemsArr = p.inItems.slice().sort((a, b) => b.createdAt - a.createdAt);
+    await writeBoth(p.inItems.length ? itemsArr : p.curItems, p.inHl);
+    closeRestoreModal();
+    await load();
+    toast(`已用备份覆盖：共 ${p.inItems.length} 收藏 · ${p.inHl.length} 高亮`);
+  });
 
   $("btn-backup").addEventListener("click", backup);
   $("btn-restore").addEventListener("click", () => $("file").click());

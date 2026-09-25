@@ -73,6 +73,37 @@ async function clearAll() {
   return { ok: true };
 }
 
+/**
+ * 标签操作：重命名 / 合并（to 已存在时即合并去重）/ 删除（to 传空串）
+ * 一次读一次写，避免多条更新之间的竞态。
+ */
+async function tagOp(payload) {
+  const from = String((payload && payload.from) || "").trim();
+  const to = String((payload && payload.to) || "").trim();
+  if (!from) return { ok: false, error: "empty" };
+  if (from === to) return { ok: true, changed: 0, noop: true };
+  const items = await readItems();
+  let changed = 0;
+  const next = items.map((it) => {
+    const tags = Array.isArray(it.tags) ? it.tags : [];
+    if (!tags.includes(from)) return it;
+    const rest = tags.filter((t) => t !== from);
+    it = { ...it, tags: to ? normalizeTags(rest.concat(to)) : rest };
+    changed++;
+    return it;
+  });
+  if (changed) await writeItems(next);
+  return { ok: true, changed };
+}
+
+/** 整体替换存储（恢复备份「覆盖本地」用），入参已在前端做过结构校验 */
+async function replaceAll(payload) {
+  const items = Array.isArray(payload && payload.items) ? payload.items : null;
+  if (!items) return { ok: false, error: "invalid" };
+  await writeItems(items);
+  return { ok: true, count: items.length };
+}
+
 /* ---------------- 右键菜单 ---------------- */
 
 function buildMenus() {
@@ -123,6 +154,23 @@ function notifyTab(tabId, msg) {
   }
 }
 
+/* ---------------- 快捷键：秒存当前选区 ---------------- */
+
+if (API.commands && API.commands.onCommand) {
+  API.commands.onCommand.addListener(async (command) => {
+    if (command !== "clipkeep-save-selection") return;
+    let tabs = [];
+    try {
+      tabs = await API.tabs.query({ active: true, currentWindow: true });
+    } catch (_) {
+      return;
+    }
+    const tab = tabs && tabs[0];
+    if (!tab || tab.id === undefined) return;
+    notifyTab(tab.id, { type: "clipkeep:save-selection" });
+  });
+}
+
 /* ---------------- 净化阅读（优先用 content script，失败则注入） ---------------- */
 
 async function runReader(tab) {
@@ -162,6 +210,12 @@ if (API.runtime && API.runtime.onMessage) {
             break;
           case "clipkeep:clear":
             sendResponse(await clearAll());
+            break;
+          case "clipkeep:tag-op":
+            sendResponse(await tagOp(msg.payload || msg));
+            break;
+          case "clipkeep:replace":
+            sendResponse(await replaceAll(msg.payload));
             break;
           case "clipkeep:reader":
             if (sender.tab) runReader(sender.tab);

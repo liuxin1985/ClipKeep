@@ -15,6 +15,7 @@
       </div>
       <div class="header-actions">
         <button id="btn-reader" class="icon-btn" title="净化阅读当前页">📖</button>
+        <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
         <button id="btn-theme" class="icon-btn" title="切换深色模式">🌙</button>
         <button id="btn-export" class="icon-btn" title="导出全部为 Markdown">⬇</button>
       </div>
@@ -25,6 +26,23 @@
       <button class="tab" data-view="review">🔁 回顾 <span class="due" id="due" hidden></span></button>
     </nav>
 
+    <!-- 设置面板 -->
+    <section class="settings" id="settings" hidden>
+      <label class="set-row">
+        <span>每日回顾上限</span>
+        <input id="set-cap" type="number" min="1" max="200" step="1" />
+      </label>
+      <label class="set-row">
+        <span>间隔倍率</span>
+        <select id="set-mult">
+          <option value="0.5">0.5×（更快）</option>
+          <option value="1">1×（标准）</option>
+          <option value="2">2×（更慢）</option>
+        </select>
+      </label>
+      <p class="set-hint">快捷键 <kbd>Alt+Shift+K</kbd> 秒存当前选区；设置只存在本地。</p>
+    </section>
+
     <!-- 收藏视图 -->
     <div id="view-clips" class="view">
       <section class="toolbar">
@@ -33,8 +51,10 @@
           <option value="new">最新优先</option>
           <option value="old">最早优先</option>
         </select>
+        <button id="btn-tags" class="icon-btn" title="管理标签">🏷</button>
       </section>
       <section class="tags" id="tags"></section>
+      <section class="tagbox" id="tagbox" hidden></section>
       <main class="list" id="list">
         <div class="empty" id="empty">
           <div class="empty-ico">★</div>
@@ -58,6 +78,19 @@
       </div>
       <input id="file" type="file" accept="application/json,.json" hidden />
     </footer>
+
+    <!-- 恢复冲突确认 -->
+    <div class="modal" id="modal" hidden>
+      <div class="modal-card">
+        <h4 id="modal-title">恢复备份</h4>
+        <div class="modal-body" id="modal-body"></div>
+        <div class="modal-actions">
+          <button id="modal-ok" class="mini-btn primary">合并</button>
+          <button id="modal-alt" class="mini-btn danger">覆盖本地</button>
+          <button id="modal-cancel" class="mini-btn">取消</button>
+        </div>
+      </div>
+    </div>
 
     <div class="toast" id="toast"></div>
     <script src="popup.js"></script>

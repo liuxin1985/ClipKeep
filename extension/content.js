@@ -200,8 +200,8 @@
     c.dataset.text = text;
     centerCard(c, 300, 240);
     c.querySelector("." + NS + "-note").focus();
-    c.querySelector("." + NS + "-cancel").onclick = closeCard;
-    c.querySelector("." + NS + "-confirm").onclick = saveFromCard;
+    c.querySelector("." + NS + "-btn-cancel").onclick = closeCard;
+    c.querySelector("." + NS + "-btn-confirm").onclick = saveFromCard;
   }
 
   function closeCard() {
@@ -288,8 +288,8 @@
     c.dataset.text = sel.text;
     centerCard(c, 300, 180);
     noteEl.focus();
-    c.querySelector("." + NS + "-cancel").onclick = closeCard;
-    c.querySelector("." + NS + "-confirm").onclick = async () => {
+    c.querySelector("." + NS + "-btn-cancel").onclick = closeCard;
+    c.querySelector("." + NS + "-btn-confirm").onclick = async () => {
       const note = noteEl.value.trim();
       closeCard();
       await createHighlight(sel, "pink", note);
@@ -455,11 +455,28 @@
 
   /* ---------- 来自 background / popup 的消息 ---------- */
 
+  async function saveSelection() {
+    const text = getSelectionText();
+    if (!text) {
+      toast("没有选中的文字");
+      return false;
+    }
+    const res = await send({
+      type: "clipkeep:add",
+      payload: { text, url: location.href, title: document.title },
+    });
+    toast(res && res.ok ? "已收藏 ✓" : "保存失败");
+    return !!(res && res.ok);
+  }
+
   if (API.runtime && API.runtime.onMessage) {
     API.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!msg || !msg.type) return;
       if (msg.type === "clipkeep:toast") {
         toast(msg.message || "");
+        sendResponse({ ok: true });
+      } else if (msg.type === "clipkeep:save-selection") {
+        saveSelection(); // 结果用页面 toast 反馈，无需等待应答
         sendResponse({ ok: true });
       } else if (msg.type === "clipkeep:reader") {
         if (readerRoot) exitReader();
