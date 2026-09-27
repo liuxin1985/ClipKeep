@@ -77,16 +77,25 @@
       return null;
     }
   }
-  /** 返回 false 表示没写进去，调用方要回滚界面 */
-  async function setHighlights(list) {
-    if (contextLost) { toast(RELOAD_HINT); return false; }
+  /**
+   * 高亮的写入统一交给后台串行执行（页面只负责读）。
+   * 返回 null 表示没落盘：调用方要回滚界面，别让页面和存储不一致。
+   */
+  async function hlWrite(msg) {
+    if (contextLost) {
+      toast(RELOAD_HINT);
+      return null;
+    }
+    let res = null;
     try {
-      await API.storage.local.set({ [HL_KEY]: list });
-      return true;
+      res = await API.runtime.sendMessage(msg);
     } catch (e) {
       noteStorageDead(e);
-      return false;
+      return null;
     }
+    if (res && res.ok) return res;
+    noteStorageDead(res && res.error); // 后台把存储错误翻译成了 {ok:false}，别静默失败
+    return null;
   }
   function makeId() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -297,17 +306,17 @@
       toast("该处无法高亮");
       return;
     }
-    const list = await getHighlights();
-    if (!list) { unwrapMark(mark); return; } // 读不到就别覆盖，否则会清空别人的高亮
-    list.push({
+    // 写入走后台 upsert，不再读整表回写：那样会抹掉别的标签页同时新增的高亮
+    const rec = {
       id,
       url: location.href,
+      title: document.title || "",
       text: sel.text,
       color: colorKey,
       note: note || "",
       createdAt: Date.now(),
-    });
-    if (!(await setHighlights(list))) { unwrapMark(mark); return; }
+    };
+    if (!(await hlWrite({ type: "clipkeep:hl-add", payload: rec }))) { unwrapMark(mark); return; }
     window.getSelection().removeAllRanges();
     toast(note ? "已批注 ✓" : "已高亮 ✓");
   }
@@ -417,14 +426,14 @@
     );
     if (action === null) return;
     if (action.trim().toLowerCase() === "!d") {
-      // 先写存储，成功后再改页面：失败时标记还在，和存储保持一致
-      if (await setHighlights(list.filter((h) => h.id !== id))) {
+      // 先写存储（进回收站，可撤销），成功后再改页面：失败时标记还在，和存储保持一致
+      if (await hlWrite({ type: "clipkeep:hl-delete", id })) {
         unwrapMark(mark);
         toast("已删除高亮");
       }
     } else {
       const note = action.trim();
-      if (await setHighlights(list.map((h) => (h.id === id ? { ...h, note } : h)))) {
+      if (await hlWrite({ type: "clipkeep:hl-update", id, patch: { note } })) {
         mark.title = note ? "ClipKeep 批注：" + note : "";
         mark.classList.toggle("has-note", !!note);
         toast("批注已更新 ✓");

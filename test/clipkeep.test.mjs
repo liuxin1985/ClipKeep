@@ -516,6 +516,7 @@ async function mountPopup(seed) {
   const q = (s) => w.document.querySelector(s);
   const qa = (s) => [...w.document.querySelectorAll(s)];
   const click = async (el) => { el.dispatchEvent(new w.MouseEvent("click", { bubbles: true })); await tick(10); };
+  const fire = async (el, type) => { el.dispatchEvent(new w.Event(type, { bubbles: true })); await tick(10); };
   const fileInput = $("file");
   const putFile = async (obj) => {
     Object.defineProperty(fileInput, "files", { value: [obj], configurable: true });
@@ -524,7 +525,7 @@ async function mountPopup(seed) {
   };
   const putBackup = async (data, name = "bk.json") =>
     putFile(new w.File([JSON.stringify(data)], name, { type: "application/json" }));
-  return { be, store: be.store, w, $, q, qa, click, putBackup, getDownloaded: () => downloaded };
+  return { be, store: be.store, w, chrome: be.chrome, $, q, qa, click, fire, putFile, putBackup, getDownloaded: () => downloaded };
 }
 
 async function testRestoreSafety() {
@@ -539,6 +540,8 @@ async function testRestoreSafety() {
     const p = await mountPopup();
     await p.putBackup({ app: "ClipKeep", version: 1, items: [
       mk('a" onmouseover="alert(1)', "注入测试"),
+    ], highlights: [
+      { id: 'h" onmouseover="x', url: "http://localhost/p", text: "高亮注入", color: "rainbow", createdAt: now },
     ] });
     ok("差异弹窗打开", p.$("modal").hidden === false);
     await p.click(p.$("modal-ok"));
@@ -547,6 +550,9 @@ async function testRestoreSafety() {
     ok("入库 id 只含安全字符", /^[\w-]{1,64}$/.test(stored.id), stored.id);
     ok("页面没有注入的事件属性", p.w.document.querySelector("[onmouseover]") === null);
     ok("注入条目正常渲染", /注入测试/.test(p.q(".item").textContent));
+    const storedHl = p.store.clipkeep_highlights[0];
+    ok("高亮 id 同样过滤", /^[\w-]{1,64}$/.test(storedHl.id), storedHl.id);
+    ok("未知颜色回落到合法值", ["yellow", "green", "pink", "blue"].includes(storedHl.color), storedHl.color);
   }
 
   /* 2. 合并必须由 background 现读现写：弹窗开着时别的标签页存的不能丢 */
@@ -604,6 +610,31 @@ async function testRestoreSafety() {
     const toastText = p.$("toast").textContent;
     ok("提示里的收藏数与实际一致", /共 2 收藏/.test(toastText), toastText);
     eq("本地收藏未被清空", p.store.clipkeep_items.length, 2);
+  }
+
+  /* 6. 覆盖只针对弹窗看到的那份快照：弹窗开着时别处新增的内容不能被抹掉 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("k1", "本地收藏")],
+      clipkeep_highlights: [hl("h1", "本地高亮")],
+    });
+    await p.putBackup({
+      app: "ClipKeep", version: 1,
+      items: [mk("k1", "本地收藏"), mk("b1", "备份收藏")],
+      highlights: [hl("h1", "本地高亮"), hl("b2", "备份高亮")],
+    });
+    ok("覆盖前差异弹窗打开", p.$("modal").hidden === false);
+    // 弹窗读快照之后，另一个标签页存了一条收藏、划了一条高亮
+    await p.be.send({ type: "clipkeep:add", payload: { text: "期间新存收藏" } });
+    await p.be.send({ type: "clipkeep:hl-add", payload: { id: "live", url: "http://localhost/p", title: "", text: "期间新增高亮", color: "yellow", note: "", createdAt: Date.now() } });
+    await p.click(p.$("modal-alt"));
+    await tick(30);
+    const texts = p.store.clipkeep_items.map((x) => x.text);
+    const ids = p.store.clipkeep_highlights.map((x) => x.id);
+    ok("覆盖补上备份收藏", texts.includes("备份收藏"), texts.join(","));
+    ok("覆盖不抹掉期间新增的收藏", texts.includes("期间新存收藏"), texts.join(","));
+    ok("覆盖补上备份高亮", ids.includes("b2"), ids.join(","));
+    ok("覆盖不抹掉期间新增的高亮", ids.includes("live"), ids.join(","));
   }
 }
 
@@ -672,6 +703,200 @@ async function testReviewGuard() {
     eq("单击「简单」升 2 盒", get(p, "g1").box, 3);
     eq("盒 3 间隔 7 天", get(p, "g1").due - Date.now(), 7 * DAY, 5000);
     eq("打卡次数 +1", get(p, "g1").seen, 2);
+  }
+}
+
+/* ---------------- 2d. 高亮 / 批注总览 ---------------- */
+
+async function testMarksOverview() {
+  console.log("\n[2d] 高亮批注总览");
+  const now = Date.now();
+  const h = (id, url, title, text, note, color) => ({
+    id, url, title, text, note: note || "", color: color || "yellow", createdAt: now,
+  });
+  const seed = () => ({
+    clipkeep_highlights: [
+      h("m1", "http://x/quantum", "量子计算入门", "量子比特可以同时处于两种状态", "重点看叠加", "green"),
+      h("m2", "http://x/quantum", "量子计算入门", "退相干时间很短", "", "yellow"),
+      h("m3", "http://x/cook", "家常菜", "糖色要炒到冒小泡", "别大火", "pink"),
+    ],
+  });
+
+  const p = await mountPopup(seed());
+
+  /* 入口与计数 */
+  ok("有高亮标签页", !!p.q('.tab[data-view="marks"]'));
+  eq("标签上显示总条数", p.$("mark-count").textContent, "3");
+
+  /* 按页面分组 */
+  await p.click(p.q('.tab[data-view="marks"]'));
+  ok("切到高亮视图", p.$("view-marks").hidden === false && p.$("view-clips").hidden === true);
+  eq("按页面分组数", p.qa(".hl-group").length, 2);
+  eq("量子页里的批注数", p.qa('.hl-group[data-url="http://x/quantum"] .hl-item').length, 2);
+  ok("组头显示页面标题", /量子计算入门/.test(p.qa(".hl-group")[0].textContent));
+  ok("批注正文渲染出来", /重点看叠加/.test(p.w.document.body.textContent));
+  ok("无批注的不显示批注行", p.qa('.hl-group[data-url="http://x/quantum"] .hl-item')[1].querySelector(".hl-note") === null);
+
+  /* 搜索过滤 */
+  p.$("search").value = "退相干";
+  await p.fire(p.$("search"), "input");
+  eq("过滤后只剩一条", p.qa(".hl-item").length, 1);
+  eq("命中的就是那条", p.q(".hl-item").dataset.hlid, "m2");
+  ok("命中关键词标黄", p.q(".hl-item mark.hit").textContent === "退相干");
+  p.$("search").value = "";
+  await p.fire(p.$("search"), "input");
+  eq("清空搜索恢复全部", p.qa(".hl-item").length, 3);
+
+  /* 删除 */
+  await p.click(p.q('.hl-item[data-hlid="m3"] [data-act="hl-del"]'));
+  await tick(20);
+  eq("删除后存储少一条", p.store.clipkeep_highlights.length, 2);
+  eq("删除后列表同步", p.qa(".hl-item").length, 2);
+  eq("删除后计数更新", p.$("mark-count").textContent, "2");
+  ok("删除过的页面组消失", p.q('.hl-group[data-url="http://x/cook"]') === null);
+
+  /* 外部改动（别的标签页删了高亮）要实时反映 */
+  await p.chrome.storage.local.set({ clipkeep_highlights: p.store.clipkeep_highlights.filter((x) => x.id !== "m2") });
+  await tick(20);
+  eq("外部删除后列表自动刷新", p.qa(".hl-item").length, 1);
+
+  /* 导出 Markdown */
+  const before = p.getDownloaded();
+  await p.click(p.$("btn-hl-export"));
+  await tick(20);
+  const md = p.getDownloaded();
+  ok("导出的是新文件", !!md && md !== before);
+  ok("导出含页面标题与出处", /##\s*量子计算入门/.test(md) && /\*\*来源\*\*:\s*http:\/\/x\/quantum/.test(md), md && md.slice(0, 200));
+  ok("导出含原文", /==量子比特可以同时处于两种状态==/.test(md));
+  ok("导出含批注", /— 批注：重点看叠加/.test(md));
+  ok("导出不含已删除项", !/退相干/.test(md) && !/糖色/.test(md));
+
+  /* 恶意内容不能注入扩展页 */
+  {
+    const evil = await mountPopup({
+      clipkeep_highlights: [h("e1", 'http://x/<img src=1 onerror=alert(1)>', '<img src=1 onerror=alert(2)>', "正文<img src=1 onerror=alert(3)>", "批注\" onmouseover=\"alert(4)", "yellow")],
+    });
+    await evil.click(evil.q('.tab[data-view="marks"]'));
+    eq("恶意内容不生成元素", evil.w.document.querySelectorAll("img").length, 0);
+    ok("恶意内容以文本显示", /onerror/.test(evil.q(".hl-item").textContent));
+  }
+}
+
+/* ---------------- 2e. 删除可撤销（回收站） ---------------- */
+
+async function testTrash() {
+  console.log("\n[2e] 回收站与撤销");
+  const now = Date.now();
+  const mk = (id, text) => ({ id, text, note: "", tags: ["甲"], url: "http://x/1", title: "页面", createdAt: now - 1000 });
+  const hl = (id, text) => ({ id, url: "http://x/1", title: "页面", text, color: "yellow", note: "", createdAt: now });
+
+  /* 1. 后台：删除收藏会进回收站，撤销后原样回来 */
+  {
+    const be = makeBackend();
+    await be.send({ type: "clipkeep:add", payload: { text: "会被删掉", tags: "甲" } });
+    const id = be.store.clipkeep_items[0].id;
+    const del = await be.send({ type: "clipkeep:delete", id });
+    ok("删除返回可撤销标记", del.undone !== undefined || del.trashed === true, JSON.stringify(del));
+    eq("收藏已从列表移除", be.store.clipkeep_items.length, 0);
+    const list = await be.send({ type: "clipkeep:trash-list" });
+    eq("回收站有 1 项", list.items.length, 1);
+    eq("回收站记录的是刚删的那条", list.items[0].item.text, "会被删掉");
+    const res = await be.send({ type: "clipkeep:trash-restore", tid: list.items[0].tid });
+    ok("撤销成功", res.ok === true);
+    eq("撤销后收藏回来", be.store.clipkeep_items.length, 1);
+    eq("撤销后内容不变", be.store.clipkeep_items[0].text, "会被删掉");
+    eq("撤销后标签不丢", (be.store.clipkeep_items[0].tags || []).join(","), "甲");
+    const again = await be.send({ type: "clipkeep:trash-restore", tid: list.items[0].tid });
+    ok("重复撤销返回 not_found", again.ok === false && again.error === "not_found");
+  }
+
+  /* 2. 后台：删除高亮同样可撤销；高亮新增走后台，不再整表覆盖 */
+  {
+    const be = makeBackend();
+    const add1 = await be.send({ type: "clipkeep:hl-add", payload: hl("ha", "第一条高亮") });
+    ok("hl-add 成功", add1.ok === true);
+    await be.send({ type: "clipkeep:hl-add", payload: hl("hb", "第二条高亮") });
+    eq("两条高亮都在", be.store.clipkeep_highlights.length, 2);
+    const t = await be.send({ type: "clipkeep:hl-delete", id: "hb" });
+    ok("删除高亮报告进回收站", t.ok === true && t.trashed === true);
+    eq("高亮已移出", be.store.clipkeep_highlights.length, 1);
+    const list = await be.send({ type: "clipkeep:trash-list" });
+    eq("回收站含高亮", list.items.filter((x) => x.kind === "hl").length, 1);
+    await be.send({ type: "clipkeep:trash-restore", tid: list.items[0].tid });
+    eq("撤销后高亮回来", be.store.clipkeep_highlights.length, 2);
+    // 两个标签页同时高亮：一条都不能丢
+    const be2 = makeBackend();
+    await Promise.all([
+      be2.send({ type: "clipkeep:hl-add", payload: hl("c1", "并发一") }),
+      be2.send({ type: "clipkeep:hl-add", payload: hl("c2", "并发二") }),
+    ]);
+    eq("并发高亮两条都在", be2.store.clipkeep_highlights.length, 2);
+    await be2.send({ type: "clipkeep:hl-update", id: "c1", patch: { note: "改批注" } });
+    eq("hl-update 改批注", be2.store.clipkeep_highlights.find((x) => x.id === "c1").note, "改批注");
+    eq("hl-update 不动其他字段", be2.store.clipkeep_highlights.find((x) => x.id === "c1").text, "并发一");
+  }
+
+  /* 3. 超过 10 分钟的回收条目自动失效 */
+  {
+    const be = makeBackend();
+    await be.send({ type: "clipkeep:add", payload: { text: "过期回收" } });
+    const id = be.store.clipkeep_items[0].id;
+    await be.send({ type: "clipkeep:delete", id });
+    be.store.clipkeep_trash[0].deletedAt = Date.now() - 11 * 60 * 1000;
+    const list = await be.send({ type: "clipkeep:trash-list" });
+    eq("超时条目被自动清理", list.items.length, 0);
+    eq("超时后回收站存储也清空", be.store.clipkeep_trash.length, 0);
+  }
+
+  /* 4. 清空回收站后不可再撤销 */
+  {
+    const be = makeBackend();
+    await be.send({ type: "clipkeep:add", payload: { text: "甲" } });
+    await be.send({ type: "clipkeep:delete", id: be.store.clipkeep_items[0].id });
+    const cleared = await be.send({ type: "clipkeep:trash-clear" });
+    ok("清空成功", cleared.ok === true);
+    eq("回收站已空", be.store.clipkeep_trash.length, 0);
+  }
+
+  /* 5. 备份不含回收站内容；撤销条 / 清空回收站走通 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("i1", "在册收藏"), mk("i2", "另一条")], clipkeep_trash: [] });
+    await p.click(p.q('.tab[data-view="clips"]'));
+    await p.click(p.q('.item[data-id="i1"] [data-act="del"]'));
+    await tick(20);
+    eq("列表里少了删掉的那条", p.qa(".item").length, 1);
+    eq("回收站里有 1 项待撤销", p.store.clipkeep_trash.length, 1);
+    ok("出现撤销条", p.$("trashbar").hidden === false);
+    await p.click(p.$("btn-backup"));
+    await tick(20);
+    const backup = JSON.parse(p.getDownloaded());
+    ok("备份导出的是收藏", Array.isArray(backup.items) && backup.items.length === 1);
+    ok("备份不含回收站", backup.trash === undefined);
+    await p.click(p.$("btn-undo"));
+    await tick(20);
+    eq("点撤销后收藏回到列表", p.qa(".item").length, 2);
+    ok("撤销回来的还是原来那条", p.qa(".item").some((n) => n.dataset.id === "i1"));
+    ok("撤销后撤销条收起", p.$("trashbar").hidden === true);
+    // 再来一次，走「清空」
+    await p.click(p.q('.item[data-id="i1"] [data-act="del"]'));
+    await tick(20);
+    await p.click(p.$("btn-trash-clear"));
+    await tick(20);
+    eq("清空后回收站为空", (p.store.clipkeep_trash || []).length, 0);
+    ok("清空后撤销条收起", p.$("trashbar").hidden === true);
+  }
+
+  /* 6. 高亮视图的删除也能撤销 */
+  {
+    const p = await mountPopup({ clipkeep_highlights: [hl("h1", "网页上的句子")] });
+    await p.click(p.q('.tab[data-view="marks"]'));
+    await p.click(p.q('.hl-item[data-hlid="h1"] [data-act="hl-del"]'));
+    await tick(20);
+    eq("高亮从视图消失", p.qa(".hl-item").length, 0);
+    eq("高亮进了回收站", p.store.clipkeep_trash.length, 1);
+    await p.click(p.$("btn-undo"));
+    await tick(20);
+    eq("撤销后高亮回来", p.qa(".hl-item").length, 1);
   }
 }
 
@@ -934,7 +1159,7 @@ async function testHighlightSync() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testContent, testHighlightSync];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync];
   for (const s of suites) {
     try {
       await s();

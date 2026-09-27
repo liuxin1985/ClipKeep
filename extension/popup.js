@@ -8,6 +8,7 @@
   const API = (typeof browser !== "undefined" && browser.runtime) ? browser : chrome;
   const STORAGE_KEY = "clipkeep_items";
   const HL_KEY = "clipkeep_highlights";
+  const TRASH_KEY = "clipkeep_trash";
   const PREFS_KEY = "clipkeep_prefs";
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
@@ -23,11 +24,18 @@
   const sortEl = $("sort");
   const toastEl = $("toast");
   const dueEl = $("due");
+  const markCountEl = $("mark-count");
+  const marksEl = $("marks");
+  const toolbarEl = $("toolbar");
   const reviewEl = $("review");
   const settingsEl = $("settings");
   const modalEl = $("modal");
+  const trashbarEl = $("trashbar");
+  const trashTextEl = $("trash-text");
 
   let items = [];
+  let marks = []; // 网页高亮 / 批注
+  let trash = []; // 最近删除的收藏 / 高亮，10 分钟内可撤销
   let prefs = DEFAULT_PREFS;
   let activeTag = "";
   let view = "clips";
@@ -114,12 +122,29 @@
   /* ---------- 数据加载 ---------- */
 
   async function load() {
-    const obj = await API.storage.local.get([STORAGE_KEY, PREFS_KEY]);
+    const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY, PREFS_KEY]);
     items = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
+    marks = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
     prefs = obj[PREFS_KEY] || {};
+    trash = await readTrash();
     applyTheme(prefs.dark ? "dark" : "light");
     syncSettings();
     render();
+  }
+
+  /**
+   * 回收站由后台统一做过期清理（顺带把清理结果写回存储），
+   * 弹窗只读它，避免自己算一遍 TTL 跟后台口径不一致。
+   */
+  async function readTrash() {
+    try {
+      const res = await API.runtime.sendMessage({ type: "clipkeep:trash-list" });
+      if (res && res.ok && Array.isArray(res.items)) return res.items;
+    } catch (_) {
+      /* 后台不可用时退回直读 */
+    }
+    const obj = await API.storage.local.get(TRASH_KEY);
+    return Array.isArray(obj[TRASH_KEY]) ? obj[TRASH_KEY] : [];
   }
 
   function syncSettings() {
@@ -183,6 +208,9 @@
 
   function render() {
     countEl.textContent = String(items.length);
+    markCountEl.hidden = marks.length === 0;
+    markCountEl.textContent = String(marks.length);
+    renderTrashbar();
     const due = dueItems().length;
     const queued = Math.min(due, reviewPrefs().cap);
     if (queued > 0) {
@@ -193,7 +221,15 @@
       dueEl.hidden = true;
     }
 
+    // 工具条按视图取用：收藏和高亮共用搜索框，回顾没有搜索
+    toolbarEl.hidden = view === "review";
+    searchEl.placeholder = view === "marks" ? "搜索高亮与批注…" : "搜索收藏内容…";
+    sortEl.hidden = view !== "clips";
+    $("btn-tags").hidden = view !== "clips";
+    $("btn-hl-export").hidden = view !== "marks";
+
     if (view === "review") renderReview();
+    else if (view === "marks") renderMarks();
     else renderClips();
   }
 
@@ -239,6 +275,159 @@
         </div>
       </div>`;
   }
+
+  /* ---------- 高亮 / 批注视图 ---------- */
+
+  const COLOR_HEX = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
+
+  function hlFiltered() {
+    const q = searchEl.value.trim().toLowerCase();
+    return marks
+      .filter((h) => h && h.text)
+      .filter((h) =>
+        !q ||
+        h.text.toLowerCase().includes(q) ||
+        String(h.note || "").toLowerCase().includes(q) ||
+        String(h.title || "").toLowerCase().includes(q) ||
+        String(h.url || "").toLowerCase().includes(q)
+      )
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
+  /** 按页面分组，组按该页最新一条高亮的时间倒序 */
+  function hlGroups() {
+    const map = new Map();
+    hlFiltered().forEach((h) => {
+      const key = String(h.url || "");
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(h);
+    });
+    return [...map.entries()];
+  }
+
+  function hlPageName(url, list) {
+    const withTitle = list.find((x) => x.title);
+    return (withTitle && withTitle.title) || hostname(url) || url;
+  }
+
+  function hlNode(h, q) {
+    const note = h.note ? `<div class="hl-note">✎ ${hit(h.note, q)}</div>` : "";
+    const bg = COLOR_HEX[h.color] || COLOR_HEX.yellow;
+    return `
+      <div class="hl-item" data-hlid="${esc(h.id)}">
+        <span class="hl-swatch" style="background:${bg}"></span>
+        <div class="hl-body">
+          <div class="hl-text">${hit(h.text, q)}</div>
+          ${note}
+          <div class="hl-meta">${fmtDate(h.createdAt)}</div>
+        </div>
+        <div class="hl-actions">
+          <button class="mini-btn" data-act="hl-copy">复制</button>
+          <button class="mini-btn danger" data-act="hl-del">删除</button>
+        </div>
+      </div>`;
+  }
+
+  function hlEmpty(ico, title, tip) {
+    return `<div class="empty"><div class="empty-ico">${ico}</div><p>${title}</p><span>${tip}</span></div>`;
+  }
+
+  function renderMarks() {
+    const q = searchEl.value.trim();
+    const groups = hlGroups();
+    if (!marks.length) {
+      marksEl.innerHTML = hlEmpty("🖍", "还没有高亮", "在网页上划选文字，点工具条的 🖍 高亮或 ✎ 批注。");
+      return;
+    }
+    if (!groups.length) {
+      marksEl.innerHTML = hlEmpty("🔍", "无匹配结果", "换个关键词试试。");
+      return;
+    }
+    marksEl.innerHTML = groups
+      .map(([url, list]) => {
+        const name = hlPageName(url, list);
+        const safe = /^(https?:|file:)/i.test(url) ? url : "";
+        const page = safe
+          ? `<a class="hl-page" href="${esc(safe)}" target="_blank" rel="noopener" title="${esc(url)}">${esc(name)}</a>`
+          : `<span class="hl-page">${esc(name)}</span>`;
+        return `
+        <section class="hl-group" data-url="${esc(url)}">
+          <div class="hl-group-head">${page}<span class="hl-num">${list.length}</span></div>
+          ${list.map((h) => hlNode(h, q)).join("")}
+        </section>`;
+      })
+      .join("");
+  }
+
+  /** 导出当前筛选结果为 Markdown，按页面分组 */
+  function exportHighlights() {
+    const groups = hlGroups();
+    if (!groups.length) return toast("没有可导出的高亮");
+    const lines = ["# ClipKeep 高亮与批注", "", `导出时间：${fmtDate(Date.now())}`, ""];
+    groups.forEach(([url, list]) => {
+      lines.push(`## ${hlPageName(url, list)}`);
+      if (url) lines.push(`**来源**: ${url}`);
+      lines.push("");
+      list.forEach((h) => {
+        const text = String(h.text).replace(/\s*\n\s*/g, " ");
+        lines.push(`- ==${text}==` + (h.note ? ` — 批注：${String(h.note).replace(/\s*\n\s*/g, " ")}` : ""));
+      });
+      lines.push("");
+    });
+    download(lines.join("\n"), `clipkeep-highlights-${Date.now()}.md`);
+    toast(`已导出 ${hlFiltered().length} 条高亮`);
+  }
+
+  marksEl.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-act]");
+    if (!btn) return;
+    const row = e.target.closest(".hl-item");
+    if (!row) return;
+    const id = row.dataset.hlid;
+    const h = marks.find((x) => String(x.id) === id);
+    if (!h) return;
+    const act = btn.dataset.act;
+    if (act === "hl-copy") copyText(h.text);
+    else if (act === "hl-del") {
+      // 走后台：进回收站 + 串行写，避免整表覆盖抹掉别处新增的高亮
+      const res = await API.runtime.sendMessage({ type: "clipkeep:hl-delete", id });
+      if (!res || !res.ok) return toast("删除失败，请重试");
+      await load();
+      toast("已删除高亮");
+    }
+  });
+
+  $("btn-hl-export").addEventListener("click", exportHighlights);
+
+  /* ---------- 回收站 / 撤销 ---------- */
+
+  function renderTrashbar() {
+    trashbarEl.hidden = trash.length === 0;
+    if (!trash.length) return;
+    const kinds = new Set(trash.map((t) => (t && t.kind === "hl" ? "高亮" : "收藏")));
+    trashTextEl.textContent =
+      `已删除 ${trash.length} 项${kinds.size > 1 ? "（收藏 + 高亮）" : "（" + [...kinds][0] + "）"} · 10 分钟内可撤销`;
+  }
+
+  $("btn-undo").addEventListener("click", async () => {
+    const entry = trash[0];
+    if (!entry) return;
+    const res = await API.runtime.sendMessage({ type: "clipkeep:trash-restore", tid: entry.tid });
+    if (!res || !res.ok) {
+      await load();
+      toast(res && res.error === "not_found" ? "该条目已过期，无法撤销" : "撤销失败，请重试");
+      return;
+    }
+    await load();
+    toast(res.exists ? "该内容已存在，未重复添加" : "已撤销删除 ✓");
+  });
+
+  $("btn-trash-clear").addEventListener("click", async () => {
+    if (!confirm("清空回收站？清空后无法再撤销。")) return;
+    await API.runtime.sendMessage({ type: "clipkeep:trash-clear" });
+    await load();
+    toast("回收站已清空");
+  });
 
   /* ---------- 标签管理面板 ---------- */
 
@@ -409,7 +598,7 @@
     render();
   });
 
-  searchEl.addEventListener("input", renderClips);
+  searchEl.addEventListener("input", render);
   sortEl.addEventListener("change", renderClips);
   $("btn-theme").addEventListener("click", toggleTheme);
   $("btn-export").addEventListener("click", exportMd);
@@ -421,6 +610,7 @@
     view = tab.dataset.view;
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     $("view-clips").hidden = view !== "clips";
+    $("view-marks").hidden = view !== "marks";
     $("view-review").hidden = view !== "review";
     render();
   });
@@ -526,6 +716,22 @@
   }
 
   const hlKeyOf = (h) => h.id || (h.url + "|" + h.text + "|" + h.createdAt);
+  const HL_COLORS = ["yellow", "green", "pink", "blue"];
+
+  /** 高亮记录同样是外部数据：id 白名单、颜色取合法值、字段补齐 */
+  function normalizeHighlight(h) {
+    if (!h || typeof h !== "object" || !h.text || !h.url) return null;
+    const rawId = String(h.id === undefined || h.id === null ? "" : h.id);
+    return {
+      id: SAFE_ID.test(rawId) ? rawId : genId(),
+      url: String(h.url),
+      title: String(h.title || ""),
+      text: String(h.text),
+      note: String(h.note || ""),
+      color: HL_COLORS.indexOf(h.color) >= 0 ? h.color : "yellow",
+      createdAt: Number(h.createdAt) || Date.now(),
+    };
+  }
 
   async function restore(file) {
     let data;
@@ -535,10 +741,11 @@
       return toast("恢复失败：文件解析错误");
     }
     const inItems = Array.isArray(data.items) ? data.items.map(normalizeItem).filter(Boolean) : [];
-    const inHl = Array.isArray(data.highlights) ? data.highlights.filter((h) => h && h.text && h.url) : [];
+    const inHl = Array.isArray(data.highlights) ? data.highlights.map(normalizeHighlight).filter(Boolean) : [];
     if (!inItems.length && !inHl.length) return toast("备份文件为空或格式不符");
 
     const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY]);
+    const takenAt = Date.now(); // 快照读取时刻：比这更新的记录没出现在差异里，不能被覆盖抹掉
     const curItems = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
     const curHl = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
     const inIds = new Set(inItems.map((x) => x.id));
@@ -556,6 +763,7 @@
       inHl,
       curItems,
       curHl,
+      takenAt,
     };
     if (!plan.addItems.length && !plan.addHl.length && plan.sameItems === curItems.length) {
       return toast("备份与本地一致，无需恢复");
@@ -586,9 +794,14 @@
     pendingRestore = null;
   }
 
-  async function writeBoth(itemsArr, hlArr) {
-    await API.runtime.sendMessage({ type: "clipkeep:replace", payload: { items: itemsArr } });
-    await API.storage.local.set({ [HL_KEY]: hlArr });
+  /** 两类内容都交给后台串行写；takenAt 让「覆盖」只作用于弹窗看到的那份快照 */
+  async function writeBoth(itemsArr, hlArr, takenAt) {
+    const iRes = await API.runtime.sendMessage({ type: "clipkeep:replace", payload: { items: itemsArr, takenAt } });
+    const hRes = await API.runtime.sendMessage({ type: "clipkeep:hl-replace", payload: { highlights: hlArr, takenAt } });
+    return {
+      items: iRes && iRes.ok ? iRes.count : itemsArr.length,
+      hl: hRes && hRes.ok ? hRes.count : hlArr.length,
+    };
   }
 
   $("modal-cancel").addEventListener("click", closeRestoreModal);
@@ -601,12 +814,15 @@
     // 收藏交给 background 现读现写：弹窗开着时别的标签页存的内容不会被旧快照抹掉
     const res = await API.runtime.sendMessage({ type: "clipkeep:merge", payload: { items: p.inItems } });
     if (!res || !res.ok) return toast("合并失败，请重试");
-    const hmap = new Map(p.curHl.map((x) => [hlKeyOf(x), x]));
-    p.addHl.forEach((x) => hmap.set(hlKeyOf(x), x));
-    if (hmap.size !== p.curHl.length) await API.storage.local.set({ [HL_KEY]: [...hmap.values()] });
+    // 高亮同理：逐条走后台 upsert，不再拿旧快照整表回写
+    let hlAdded = 0;
+    for (const h of p.addHl) {
+      const r = await API.runtime.sendMessage({ type: "clipkeep:hl-add", payload: h });
+      if (r && r.ok && !r.dup) hlAdded++;
+    }
     closeRestoreModal();
     await load();
-    toast(`已合并：新增 ${res.added} 收藏 · ${p.addHl.length} 高亮`);
+    toast(`已合并：新增 ${res.added} 收藏 · ${hlAdded} 高亮`);
   });
   $("modal-alt").addEventListener("click", async () => {
     if (!pendingRestore) return;
@@ -615,10 +831,10 @@
     // 备份没提到的类别保留本地，避免「覆盖」把高亮批注悄悄清空
     const itemsArr = (p.inItems.length ? p.inItems : p.curItems).slice().sort((a, b) => b.createdAt - a.createdAt);
     const hlArr = p.inHl.length ? p.inHl : p.curHl;
-    await writeBoth(itemsArr, hlArr);
+    const written = await writeBoth(itemsArr, hlArr, p.takenAt);
     closeRestoreModal();
     await load();
-    toast(`已用备份覆盖：共 ${itemsArr.length} 收藏 · ${hlArr.length} 高亮`);
+    toast(`已用备份覆盖：共 ${written.items} 收藏 · ${written.hl} 高亮`);
   });
 
   $("btn-backup").addEventListener("click", backup);
@@ -633,6 +849,8 @@
     if (!items.length) return toast("已经是空的了");
     if (confirm("确定清空全部收藏？此操作不可恢复（高亮批注不受影响）。")) {
       await API.runtime.sendMessage({ type: "clipkeep:clear" });
+      // 既然提示了「不可恢复」，就别让回收站留着后门
+      await API.runtime.sendMessage({ type: "clipkeep:trash-clear" });
       await load();
       toast("已清空");
     }
@@ -641,7 +859,8 @@
   /* ---------- 实时刷新 ---------- */
   if (API.storage && API.storage.onChanged) {
     API.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && (changes[STORAGE_KEY] || changes[PREFS_KEY])) load();
+      if (area !== "local") return;
+      if (changes[STORAGE_KEY] || changes[HL_KEY] || changes[PREFS_KEY] || changes[TRASH_KEY]) load();
     });
   }
 

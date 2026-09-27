@@ -259,3 +259,45 @@ kbd {
 .mini-btn.primary:hover { background: #1d4ed8; color: #fff; }
 .mini-btn.danger { color: #ef4444; border-color: #fca5a5; }
 .mini-btn.danger:hover { background: #ef4444; border-color: #ef4444; color: #fff; }
+
+/* ---------- 高亮 / 批注视图 ---------- */
+.toolbar[hidden] { display: none; }
+.hl-group { margin-bottom: 14px; }
+.hl-group-head {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--muted); padding: 6px 2px 2px;
+}
+.hl-page {
+  color: var(--accent); text-decoration: none; font-weight: 600; font-size: 13px;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hl-page:hover { text-decoration: underline; }
+.hl-num {
+  margin-left: auto; background: var(--accent-soft); color: var(--accent);
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+}
+.hl-item {
+  display: flex; gap: 9px; align-items: flex-start;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; margin: 6px 0; box-shadow: var(--shadow);
+}
+.hl-swatch { flex: none; width: 4px; align-self: stretch; border-radius: 2px; }
+.hl-body { flex: 1; min-width: 0; }
+.hl-text { white-space: pre-wrap; word-break: break-word; line-height: 1.55; font-size: 13px; }
+.hl-note {
+  margin-top: 5px; padding-left: 7px; border-left: 2px solid var(--border);
+  font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word;
+}
+.hl-meta { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.hl-actions { display: flex; flex-direction: column; gap: 6px; }
+
+/* 删除撤销条 */
+.trashbar {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 14px 0; padding: 8px 10px;
+  background: var(--accent-soft); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow);
+}
+.trashbar[hidden] { display: none; }
+.trash-text { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
+.trashbar .mini-btn { font-size: 12px; padding: 4px 9px; }

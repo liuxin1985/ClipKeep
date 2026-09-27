@@ -23,8 +23,20 @@
 
     <nav class="tabs">
       <button class="tab active" data-view="clips">📌 收藏</button>
+      <button class="tab" data-view="marks">🖍 高亮 <span class="due" id="mark-count" hidden></span></button>
       <button class="tab" data-view="review">🔁 回顾 <span class="due" id="due" hidden></span></button>
     </nav>
+
+    <!-- 搜索工具条（收藏 / 高亮视图共用） -->
+    <section class="toolbar" id="toolbar">
+      <input id="search" type="search" placeholder="搜索收藏内容…" />
+      <select id="sort" title="排序">
+        <option value="new">最新优先</option>
+        <option value="old">最早优先</option>
+      </select>
+      <button id="btn-tags" class="icon-btn" title="管理标签">🏷</button>
+      <button id="btn-hl-export" class="icon-btn" title="导出高亮批注为 Markdown" hidden>⬇</button>
+    </section>
 
     <!-- 设置面板 -->
     <section class="settings" id="settings" hidden>
@@ -43,16 +55,15 @@
       <p class="set-hint">快捷键 <kbd>Alt+Shift+K</kbd> 秒存当前选区；设置只存在本地。</p>
     </section>
 
+    <!-- 删除撤销条 -->
+    <section class="trashbar" id="trashbar" hidden>
+      <span class="trash-text" id="trash-text">已删除 1 项</span>
+      <button id="btn-undo" class="mini-btn primary">撤销</button>
+      <button id="btn-trash-clear" class="mini-btn">清空回收站</button>
+    </section>
+
     <!-- 收藏视图 -->
     <div id="view-clips" class="view">
-      <section class="toolbar">
-        <input id="search" type="search" placeholder="搜索收藏内容…" />
-        <select id="sort" title="排序">
-          <option value="new">最新优先</option>
-          <option value="old">最早优先</option>
-        </select>
-        <button id="btn-tags" class="icon-btn" title="管理标签">🏷</button>
-      </section>
       <section class="tags" id="tags"></section>
       <section class="tagbox" id="tagbox" hidden></section>
       <main class="list" id="list">
@@ -62,6 +73,11 @@
           <span>在网页上划选文字，点「收藏」即可留存到这里。</span>
         </div>
       </main>
+    </div>
+
+    <!-- 高亮 / 批注视图 -->
+    <div id="view-marks" class="view" hidden>
+      <main class="list" id="marks"></main>
     </div>
 
     <!-- 回顾视图 -->
