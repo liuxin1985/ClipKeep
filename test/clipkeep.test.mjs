@@ -34,12 +34,15 @@ function makeBackend() {
   const listeners = [];
   const hlListeners = [];
   const commandListeners = [];
+  const installListeners = [];
+  const menuClickListeners = [];
   const sentToTab = [];
+  const menuOps = { removeAll: 0, created: [] };
 
   const chrome = {
     runtime: {
       id: "test",
-      onInstalled: { addListener() {} },
+      onInstalled: { addListener(fn) { installListeners.push(fn); } },
       onMessage: { addListener(fn) { listeners.push(fn); } },
       sendMessage(msg, cb) {
         let reply;
@@ -59,6 +62,7 @@ function makeBackend() {
           return o;
         },
         async set(obj) {
+          if (store.__failNextSet) { store.__failNextSet = false; throw new Error("QUOTA_EXCEEDED"); }
           for (const k of Object.keys(obj)) {
             const before = store[k];
             store[k] = JSON.parse(JSON.stringify(obj[k]));
@@ -69,9 +73,9 @@ function makeBackend() {
       onChanged: { addListener(fn) { hlListeners.push(fn); } },
     },
     contextMenus: {
-      removeAll(cb) { if (cb) cb(); },
-      create() {},
-      onClicked: { addListener() {} },
+      removeAll(cb) { menuOps.removeAll++; if (cb) cb(); },
+      create(opts) { menuOps.created.push(opts.id); },
+      onClicked: { addListener(fn) { menuClickListeners.push(fn); } },
     },
     commands: { onCommand: { addListener(fn) { commandListeners.push(fn); } } },
     tabs: {
@@ -96,7 +100,19 @@ function makeBackend() {
     for (const fn of commandListeners) await fn(name);
     await tick(0);
   };
-  return { store, chrome, send, fireCommand, sentToTab, listeners };
+  const menuErrors = [];
+  const fireMenuClick = async (info, tab) => {
+    // 浏览器不会把监听器里的异常抛给调用方，只会变成未处理拒绝 —— 这里等价地记录下来
+    for (const fn of menuClickListeners) {
+      try { await fn(info, tab); } catch (e) { menuErrors.push(String((e && e.message) || e)); }
+    }
+    await tick(0);
+  };
+  const fireInstalled = async (reason) => {
+    for (const fn of installListeners) await fn({ reason });
+    await tick(0);
+  };
+  return { store, chrome, send, fireCommand, fireMenuClick, fireInstalled, sentToTab, listeners, menuOps, menuErrors };
 }
 
 /* ---------------- 1. background 消息路由 ---------------- */
@@ -160,6 +176,78 @@ async function testBackground() {
   /* ---- 右键菜单收藏 ---- */
   await send({ type: "clipkeep:clear" });
   eq("clear 后为空", store.clipkeep_items.length, 0);
+}
+
+/* ---------------- 1a. 并发写入 / 错误如实上报 / 菜单注册时机 ---------------- */
+
+async function testConcurrency() {
+  console.log("\n[1a] 存储并发 / 错误上报 / 菜单注册");
+  const mk = (id, tags) => ({ id, text: "t" + id, note: "", tags, url: "", title: "", createdAt: 1 });
+
+  /* 两个标签页同时收藏：一条都不许丢 */
+  const be = makeBackend();
+  await Promise.all([
+    be.send({ type: "clipkeep:add", payload: { text: "甲" } }),
+    be.send({ type: "clipkeep:add", payload: { text: "乙" } }),
+  ]);
+  eq("并发收藏两条都在", be.store.clipkeep_items.length, 2);
+  ok("并发收藏文本齐全", ["甲", "乙"].every((t) => be.store.clipkeep_items.some((x) => x.text === t)));
+
+  /* 标签批量整理与并发新增交错：整理不能顺手删掉刚落地的收藏 */
+  const be2 = makeBackend();
+  be2.store.clipkeep_items = [mk("1", ["旧名"]), mk("2", ["旧名"])];
+  await Promise.all([
+    be2.send({ type: "clipkeep:tag-op", payload: { from: "旧名", to: "新名" } }),
+    be2.send({ type: "clipkeep:add", payload: { text: "丙" } }),
+  ]);
+  eq("整理标签不吞掉并发新增", be2.store.clipkeep_items.length, 3);
+  ok("并发新增的收藏还在", be2.store.clipkeep_items.some((x) => x.text === "丙"));
+  ok("原有两条完成整理", be2.store.clipkeep_items.filter((x) => x.tags.includes("新名")).length === 2);
+
+  /* 合并（upsert）：由 background 现读现写，绝不用弹窗打开时的旧快照 */
+  const be3 = makeBackend();
+  be3.store.clipkeep_items = [mk("x1", ["本地版本"])];
+  const merged = await be3.send({
+    type: "clipkeep:merge",
+    payload: { items: [mk("x1", ["备份版本"]), mk("x2", ["b"])] },
+  });
+  ok("merge 成功", merged.ok === true);
+  ok("merge 补上缺失项", be3.store.clipkeep_items.some((x) => x.id === "x2"));
+  eq("merge 保留本地已有版本", be3.store.clipkeep_items.find((x) => x.id === "x1").tags.join(","), "本地版本");
+  eq("merge 报告新增数", merged.added, 1);
+  const mergeBad = await be3.send({ type: "clipkeep:merge", payload: {} });
+  ok("merge 拒绝非法入参", mergeBad.ok === false && mergeBad.error === "invalid");
+
+  /* 写入失败不能谎报成「内容为空」 */
+  const be5 = makeBackend();
+  be5.store.__failNextSet = true;
+  await be5.fireMenuClick(
+    { menuItemId: "clipkeep-save", selectionText: "甲", pageUrl: "http://a" },
+    { id: 1, title: "T", url: "http://a" }
+  );
+  const toasts = be5.sentToTab.map((s) => s.msg.message).join("|");
+  eq("菜单处理不抛未捕获异常", be5.menuErrors.length, 0);
+  ok("写入失败提示不是「内容为空」", !/内容为空/.test(toasts));
+  ok("写入失败有明确反馈", /失败/.test(toasts));
+
+  /* 超长文本截断入库，避免一次粘贴撑爆存储 */
+  const be7 = makeBackend();
+  const long = await be7.send({ type: "clipkeep:add", payload: { text: "长".repeat(30000) } });
+  ok("超长文本仍入库", long.ok === true);
+  eq("超长文本截断到 2 万", long.item.text.length, 20000);
+  eq("截断有标记", long.item.truncated, true);
+
+  /* 右键菜单只在 onInstalled 建：service worker 每次唤醒都 removeAll 重建，
+     会让用户在重建瞬间点不到菜单，而浏览器本身会跨重启保留菜单 */
+  const be8 = makeBackend();
+  eq("加载脚本时不建菜单", be8.menuOps.created.length, 0);
+  await be8.fireInstalled("install");
+  eq("安装时建两个菜单项", be8.menuOps.created.length, 2);
+  await be8.fireInstalled("update");
+  eq("更新时先清空再重建", be8.menuOps.removeAll, 2);
+  eq("更新后菜单数量", be8.menuOps.created.length, 4);
+  await be8.fireInstalled("chrome_update");
+  eq("浏览器升级不重复建菜单", be8.menuOps.created.length, 4);
 }
 
 /* ---------------- 1b. 快捷键链路 ---------------- */
@@ -405,6 +493,188 @@ async function testPopup() {
   ok("单条导出为 Markdown", /^# ClipKeep 收藏/.test(downloaded) && /第一条/.test(downloaded));
 }
 
+/* ---------------- 2b. 恢复导入的安全与数据完整性 ---------------- */
+
+async function mountPopup(seed) {
+  const be = makeBackend();
+  Object.assign(be.store, seed || {});
+  let downloaded = null;
+  const dom = new JSDOM(src("popup.html"), {
+    runScripts: "outside-only",
+    url: "chrome-extension://abc/popup.html",
+    virtualConsole: new VirtualConsole(),
+  });
+  const w = dom.window;
+  w.chrome = be.chrome;
+  w.URL.createObjectURL = (b) => { b.text().then((t) => { downloaded = t; }); return "blob:x"; };
+  w.URL.revokeObjectURL = () => {};
+  w.prompt = () => "";
+  w.confirm = () => true;
+  w.eval(src("popup.js"));
+  await tick(10);
+  const $ = (id) => w.document.getElementById(id);
+  const q = (s) => w.document.querySelector(s);
+  const qa = (s) => [...w.document.querySelectorAll(s)];
+  const click = async (el) => { el.dispatchEvent(new w.MouseEvent("click", { bubbles: true })); await tick(10); };
+  const fileInput = $("file");
+  const putFile = async (obj) => {
+    Object.defineProperty(fileInput, "files", { value: [obj], configurable: true });
+    fileInput.dispatchEvent(new w.Event("change", { bubbles: true }));
+    await tick(20);
+  };
+  const putBackup = async (data, name = "bk.json") =>
+    putFile(new w.File([JSON.stringify(data)], name, { type: "application/json" }));
+  return { be, store: be.store, w, $, q, qa, click, putBackup, getDownloaded: () => downloaded };
+}
+
+async function testRestoreSafety() {
+  console.log("\n[2b] 恢复导入：注入防护 / 并发合并 / 覆盖不丢高亮");
+  const DAY = 86400000;
+  const now = Date.now();
+  const mk = (id, text, extra) => ({ id, text, note: "", tags: [], url: "", title: "", createdAt: now, ...(extra || {}) });
+  const hl = (id, text) => ({ id, url: "http://localhost/p", text, color: "yellow", note: "", createdAt: now });
+
+  /* 1. 备份里构造的 id 不能突破属性，把脚本注进扩展页 */
+  {
+    const p = await mountPopup();
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [
+      mk('a" onmouseover="alert(1)', "注入测试"),
+    ] });
+    ok("差异弹窗打开", p.$("modal").hidden === false);
+    await p.click(p.$("modal-ok"));
+    await tick(20);
+    const stored = p.store.clipkeep_items[0];
+    ok("入库 id 只含安全字符", /^[\w-]{1,64}$/.test(stored.id), stored.id);
+    ok("页面没有注入的事件属性", p.w.document.querySelector("[onmouseover]") === null);
+    ok("注入条目正常渲染", /注入测试/.test(p.q(".item").textContent));
+  }
+
+  /* 2. 合并必须由 background 现读现写：弹窗开着时别的标签页存的不能丢 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("local1", "本地已有")] });
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [mk("b1", "备份里的")] });
+    await p.be.send({ type: "clipkeep:add", payload: { text: "期间新存" } });
+    await p.click(p.$("modal-ok"));
+    await tick(20);
+    const texts = p.store.clipkeep_items.map((x) => x.text);
+    ok("合并补上备份项", texts.includes("备份里的"));
+    ok("合并不抹掉期间新存的收藏", texts.includes("期间新存"));
+    ok("合并保留本地原有项", texts.includes("本地已有"));
+  }
+
+  /* 3. 覆盖本地不得清空备份里没提到的类别（高亮 / 批注） */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("l1", "本地收藏")],
+      clipkeep_highlights: [hl("h1", "重点一"), hl("h2", "重点二")],
+    });
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [mk("b1", "备份收藏")], highlights: [] });
+    ok("差异里提示本地独有的高亮", /高亮/.test(p.$("modal-body").textContent) && /2/.test(p.$("modal-body").textContent));
+    await p.click(p.$("modal-alt"));
+    await tick(20);
+    eq("覆盖以备份为准（收藏）", p.store.clipkeep_items.length, 1);
+    eq("覆盖不清空本地高亮", p.store.clipkeep_highlights.length, 2);
+  }
+
+  /* 4. 备份里 review 缺 due 的条目要能重新进回顾，而不是永久消失 */
+  {
+    const p = await mountPopup();
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [
+      mk("r1", "复习我", { review: { box: 2 } }),
+      mk("r2", "坏排期", { review: { box: 99, due: "明天", seen: -3 } }),
+    ] });
+    await p.click(p.$("modal-ok"));
+    await tick(20);
+    eq("到期徽标含 2 条", p.$("due").textContent, "2");
+    const r1 = p.store.clipkeep_items.find((x) => x.id === "r1");
+    ok("缺 due 视为立即到期", r1.review.due <= Date.now());
+    const r2 = p.store.clipkeep_items.find((x) => x.id === "r2");
+    ok("非法 review 字段被夹取", r2.review.box >= 0 && r2.review.box <= 5 && r2.review.seen >= 0);
+  }
+
+  /* 5. 覆盖后的提示数量必须和实际写入一致 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("k1", "甲"), mk("k2", "乙")],
+      clipkeep_highlights: [hl("h9", "旧批注")],
+    });
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [], highlights: [hl("h10", "新批注")] });
+    await p.click(p.$("modal-alt"));
+    await tick(20);
+    const toastText = p.$("toast").textContent;
+    ok("提示里的收藏数与实际一致", /共 2 收藏/.test(toastText), toastText);
+    eq("本地收藏未被清空", p.store.clipkeep_items.length, 2);
+  }
+}
+
+/* ---------------- 2c. 回顾打分：一次点击只推进一次 ---------------- */
+
+async function testReviewGuard() {
+  console.log("\n[2c] 回顾打分防连点");
+  const DAY = 86400000;
+  const now = Date.now();
+  const mk = (id, text, review) => ({
+    id, text, note: "答案", tags: [], url: "http://x/1", title: "页面",
+    createdAt: now, review,
+  });
+  const seeded = () => ({
+    clipkeep_items: [
+      mk("g1", "第一条", { box: 1, due: now - 10, seen: 1 }),
+      mk("g2", "第二条", { box: 1, due: now - 5, seen: 1 }),
+    ],
+  });
+  const openReview = async () => {
+    const p = await mountPopup(seeded());
+    await p.click(p.q('.tab[data-view="review"]'));
+    await p.click(p.q('[data-act="reveal"]'));
+    return p;
+  };
+  const get = (p, id) => p.store.clipkeep_items.find((x) => x.id === id).review;
+
+  /* 连点「记得」：写入还在途中时第二次点击必须无效，否则一次跳两盒 */
+  {
+    const p = await openReview();
+    const good = p.q('.rev-grade [data-g="1"]');
+    good.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+    good.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("连点「记得」只升 1 盒", get(p, "g1").box, 2);
+    eq("连点后排期仍是盒 2 的间隔", get(p, "g1").due - Date.now(), 3 * DAY, 5000);
+    eq("连点后换到下一张卡", p.q(".rev-card").dataset.id, "g2");
+  }
+
+  /* 忘记 + 记得 连点：以第一次（忘记）为准，不能被后一次覆盖 */
+  {
+    const p = await openReview();
+    const again = p.q('.rev-grade [data-g="0"]');
+    const good = p.q('.rev-grade [data-g="1"]');
+    again.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+    good.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("连点不会把「忘记」改成「记得」", get(p, "g1").box, 0);
+    ok("「忘记」后立即再次到期", get(p, "g1").due <= Date.now() + 60);
+  }
+
+  /* 打分期间按钮应禁用：给用户明确反馈，也挡住真正的二次点击 */
+  {
+    const p = await openReview();
+    const btn = p.q('.rev-grade [data-g="1"]');
+    btn.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+    ok("写入期间打分按钮禁用", [...p.qa(".rev-grade button")].every((b) => b.disabled === true));
+    await tick(30);
+    ok("写入完成后界面已刷新", p.q(".rev-card").dataset.id === "g2");
+  }
+
+  /* 单次正常打分仍然生效（回归护栏） */
+  {
+    const p = await openReview();
+    await p.click(p.q('.rev-grade [data-g="2"]'));
+    eq("单击「简单」升 2 盒", get(p, "g1").box, 3);
+    eq("盒 3 间隔 7 天", get(p, "g1").due - Date.now(), 7 * DAY, 5000);
+    eq("打卡次数 +1", get(p, "g1").seen, 2);
+  }
+}
+
 /* ---------------- 3. content：划词高亮重放 ---------------- */
 
 async function testContent() {
@@ -525,8 +795,8 @@ async function testContent() {
   eq("取消不新增收藏", store.clipkeep_items.length, 1);
   eq("取消后卡片收起", card.style.display, "none");
 
-  // 点击已有高亮 → 删除（prompt 返回 d）
-  w.prompt = () => "d";
+  // 点击已有高亮 → 删除（显式指令 !d）
+  w.prompt = () => "!d";
   const target = w.document.querySelector('mark[data-hlid="h3"]');
   ok("存在待删除高亮", !!target);
   target.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
@@ -538,10 +808,133 @@ async function testContent() {
   ok("初始无净化阅读层", !w.document.getElementById("clipkeep-reader"));
 }
 
+/* ---------------- 3b. 高亮与存储保持一致 ---------------- */
+
+function mountContent(pageUrl, highlights, htmlBody) {
+  const be = makeBackend();
+  be.store.clipkeep_highlights = highlights;
+  const dom = new JSDOM(
+    `<!DOCTYPE html><html><body><article>${htmlBody}</article></body></html>`,
+    { runScripts: "outside-only", url: pageUrl }
+  );
+  const w = dom.window;
+  w.Range.prototype.getBoundingClientRect = () => ({ top: 100, bottom: 122, left: 120, right: 300, width: 180, height: 22, x: 120, y: 100 });
+  w.chrome = be.chrome;
+  w.prompt = () => "";
+  w.eval(src("content.js"));
+  return {
+    store: be.store, chrome: be.chrome, w,
+    marks: () => [...w.document.querySelectorAll("mark.clipkeep-hl")],
+    toastText: () => (w.document.getElementById("clipkeep-toast") || {}).textContent || "",
+    bodyText: () => w.document.querySelector("article").textContent,
+  };
+}
+
+async function testHighlightSync() {
+  console.log("\n[3b] 高亮一致性：幽灵标记 / URL 归一化 / 删除关键词 / 上下文失效");
+  const text = "量子比特可以同时处于两种状态";
+  const plain = `<p>简介：${text}，这是并行性的来源。</p><p>工程难点：退相干时间很短。</p>`;
+  const at = (u, id) => ({ id, url: u, text, color: "green", note: "重点", createdAt: Date.now() });
+
+  /* 1. 别的标签页删了记录，本页不能留下点不动的幽灵标记 */
+  {
+    const url = "http://localhost/sync1";
+    const c = mountContent(url, [at(url, "g1")], plain);
+    await tick(20);
+    eq("初始重放 1 个标记", c.marks().length, 1);
+    await c.chrome.storage.local.set({ clipkeep_highlights: [] }); // 模拟另一处删除
+    await tick(30);
+    eq("记录删光后幽灵标记被清掉", c.marks().length, 0);
+    ok("原文完整", c.bodyText().includes(text) && c.bodyText().includes("这是并行性的来源"));
+
+    // 批注 / 颜色在别处被改，本页要跟上
+    await c.chrome.storage.local.set({ clipkeep_highlights: [at(url, "g1")] });
+    await tick(30);
+    eq("恢复记录后重新出现标记", c.marks().length, 1);
+    await c.chrome.storage.local.set({ clipkeep_highlights: [{ ...at(url, "g1"), note: "改过的批注", color: "blue" }] });
+    await tick(30);
+    const m = c.marks().find((x) => x.dataset.hlid === "g1");
+    eq("批注改动已同步", m && m.title, "ClipKeep 批注：改过的批注");
+    ok("颜色改动已同步", /rgb\(207, 227, 255\)|#cfe3ff/i.test(m && m.style.background), m && m.style.background);
+    eq("同步不会给同一条记录生成重复标记", c.marks().filter((x) => x.dataset.hlid === "g1").length, 1);
+  }
+
+  /* 2. 同一页面加了 #锚点 不能让高亮消失 */
+  {
+    const c = mountContent("http://localhost/sync2#top", [at("http://localhost/sync2", "a1")], plain);
+    await tick(20);
+    eq("带锚点的 URL 仍能重放", c.marks().length, 1);
+  }
+
+  /* 3. 批注正文不能当成删除指令 */
+  {
+    const url = "http://localhost/sync3";
+    const c = mountContent(url, [at(url, "k1")], plain);
+    await tick(20);
+    c.w.prompt = () => "d";
+    c.marks()[0].dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("批注为 d 时不会被误删", c.store.clipkeep_highlights.length, 1);
+    eq("批注按原文保存", c.store.clipkeep_highlights[0].note, "d");
+    c.w.prompt = () => "!d";
+    c.marks()[0].dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("显式删除指令生效", c.store.clipkeep_highlights.length, 0);
+    eq("删除后标记消失", c.marks().length, 0);
+  }
+
+  /* 5. 同一段文字里的多条高亮，重放时一条都不能挤掉另一条 */
+  {
+    const url = "http://localhost/sync5";
+    const c = mountContent(url, [
+      { id: "m1", url, text: "退相干时间很短", color: "yellow", note: "", createdAt: Date.now() },
+      { id: "m2", url, text: "需要纠错码", color: "pink", note: "考点", createdAt: Date.now() },
+    ], `<p>工程难点：退相干时间很短，需要纠错码。</p>`);
+    await tick(20);
+    eq("同段两条高亮都重放", c.marks().length, 2);
+    ok("两条记录各自成标记", ["m1", "m2"].every((id) => c.marks().some((m) => m.dataset.hlid === id)));
+    ok("原文一字不差", c.bodyText() === "工程难点：退相干时间很短，需要纠错码。", c.bodyText());
+    // 再触发一次同步：不能因为反复重放而丢标记或重复包裹
+    await c.chrome.storage.local.set({ clipkeep_highlights: c.store.clipkeep_highlights.slice() });
+    await tick(30);
+    eq("重复重放后数量不变", c.marks().length, 2);
+    ok("重复重放后原文仍完整", c.bodyText() === "工程难点：退相干时间很短，需要纠错码。", c.bodyText());
+  }
+
+  /* 4. 扩展重载 / 存储写满后，页面里要有明确提示，也不能抛未捕获拒绝 */
+  {
+    const url = "http://localhost/sync4";
+    const c = mountContent(url, [], plain);
+    await tick(20);
+    const p = c.w.document.querySelector("article p");
+    const range = c.w.document.createRange();
+    range.setStart(p.firstChild, 0);
+    range.setEnd(p.firstChild, 6);
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    c.w.document.querySelector(".clipkeep-btn-hl").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(20);
+    eq("正常写入先落盘", c.store.clipkeep_highlights.length, 1);
+    const rejections = [];
+    const onRej = (r) => rejections.push(String((r && r.message) || r));
+    process.on("unhandledRejection", onRej);
+    c.w.prompt = () => "保存不进去";
+    c.store.__failNextSet = true;
+    c.marks()[0].dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    process.off("unhandledRejection", onRej);
+    eq("存储失败不产生未捕获拒绝", rejections.length, 0);
+    ok("存储失败有页面提示", /失败|重试|刷新/.test(c.toastText()), c.toastText());
+  }
+}
+
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testShortcut, testPopup, testContent];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testContent, testHighlightSync];
   for (const s of suites) {
     try {
       await s();

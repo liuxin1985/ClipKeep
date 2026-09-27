@@ -33,6 +33,7 @@
   let view = "clips";
   let toastTimer = null;
   let pendingRestore = null;
+  let grading = false; // 回顾打分写入中
 
   function toast(msg) {
     toastEl.textContent = msg;
@@ -226,7 +227,7 @@
       : "";
     const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
     return `
-      <div class="item" data-id="${it.id}">
+      <div class="item" data-id="${esc(it.id)}">
         <div class="item-text">${hit(it.text, q)}</div>
         ${note}
         <div class="item-meta">${tags}${link}<span>${fmtDate(it.createdAt)}</span></div>
@@ -334,7 +335,7 @@
     const capNote = due.length > queued.length ? ` · 今日上限 ${cap} 条，剩余 ${due.length - queued.length} 条明天继续` : "";
     reviewEl.innerHTML = `
       <div class="rev-progress">本组待回顾 ${queued.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}${capNote}</div>
-      <div class="rev-card" data-id="${it.id}">
+      <div class="rev-card" data-id="${esc(it.id)}">
         <div class="rev-front">${esc(it.text)}</div>
         <div class="rev-back" hidden>
           ${it.note ? `<div class="rev-note">${esc(it.note)}</div>` : ""}
@@ -361,11 +362,22 @@
       btn.hidden = true;
       reviewEl.querySelector(".rev-grade").hidden = false;
     } else if (act === "grade") {
+      if (grading) return; // 写入在途时忽略后续点击，否则连点会一次跳两盒
       const it = items.find((x) => x.id === id);
       if (!it) return;
+      grading = true;
+      const btns = [...reviewEl.querySelectorAll(".rev-grade button")];
+      btns.forEach((b) => { b.disabled = true; });
       grade(it, Number(btn.dataset.g));
-      await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { review: it.review } });
-      await load();
+      let res;
+      try {
+        res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { review: it.review } });
+      } finally {
+        grading = false;
+        btns.forEach((b) => { b.disabled = false; }); // 失败时卡片还在，要能重试
+      }
+      await load(); // 以存储为准：保存失败时把本地改动丢掉，不留下和存储不一致的排期
+      if (!res || !res.ok) toast("打分保存失败，已还原，请重试");
     }
   });
 
@@ -485,17 +497,31 @@
     toast(`已备份 ${data.items.length} 条收藏 · ${data.highlights.length} 条高亮`);
   }
 
+  const SAFE_ID = /^[\w-]{1,64}$/;
+  const genId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+  /** 备份是外部文件：盒号夹到合法区间，排期缺失/非法时视为立即到期，别让条目悄悄消失 */
+  function normalizeReview(r) {
+    if (!r || typeof r !== "object") return undefined;
+    const box = Math.max(0, Math.min(INTERVALS.length - 1, Math.floor(Number(r.box)) || 0));
+    const dueNum = Number(r.due);
+    const due = Number.isFinite(dueNum) && dueNum > 0 ? dueNum : Date.now();
+    const seen = Math.max(0, Math.floor(Number(r.seen)) || 0);
+    return { box, due, seen };
+  }
+
   function normalizeItem(it) {
     if (!it || typeof it !== "object" || !it.text) return null;
+    const rawId = String(it.id === undefined || it.id === null ? "" : it.id);
     return {
-      id: String(it.id || Date.now().toString(36) + Math.random().toString(36).slice(2, 7)),
+      id: SAFE_ID.test(rawId) ? rawId : genId(),
       text: String(it.text),
       note: String(it.note || ""),
       tags: Array.isArray(it.tags) ? it.tags.map(String) : [],
       url: String(it.url || ""),
       title: String(it.title || ""),
       createdAt: Number(it.createdAt) || Date.now(),
-      review: it.review && typeof it.review.box === "number" ? it.review : undefined,
+      review: normalizeReview(it.review),
     };
   }
 
@@ -518,12 +544,14 @@
     const inIds = new Set(inItems.map((x) => x.id));
     const curIds = new Set(curItems.map((x) => x.id));
     const curHlKeys = new Set(curHl.map(hlKeyOf));
+    const inHlKeys = new Set(inHl.map(hlKeyOf));
     const plan = {
       addItems: inItems.filter((x) => !curIds.has(x.id)),
       sameItems: inItems.length - inItems.filter((x) => !curIds.has(x.id)).length,
       localOnly: curItems.filter((x) => !inIds.has(x.id)),
       addHl: inHl.filter((x) => !curHlKeys.has(hlKeyOf(x))),
       sameHl: inHl.length - inHl.filter((x) => !curHlKeys.has(hlKeyOf(x))).length,
+      localOnlyHl: curHl.filter((x) => !inHlKeys.has(hlKeyOf(x))),
       inItems,
       inHl,
       curItems,
@@ -538,12 +566,16 @@
 
   function openRestoreModal(p) {
     $("modal-title").textContent = "恢复备份 · 差异确认";
+    const hlNote = p.inHl.length === 0 && p.curHl.length
+      ? `<li><b class="same">备份未含高亮</b>，覆盖会保留本地 ${p.curHl.length} 条高亮 / 批注</li>`
+      : "";
     $("modal-body").innerHTML = `
       <ul class="diff">
         <li><b class="add">+${p.addItems.length}</b> 条备份里的新收藏</li>
         <li><b class="same">${p.sameItems}</b> 条两边已有（保留本地版本）</li>
         <li><b class="local">${p.localOnly.length}</b> 条仅存在于本地${p.localOnly.length ? "（覆盖会丢失）" : ""}</li>
         <li><b class="add">+${p.addHl.length}</b> 条新高亮 · ${p.sameHl} 条已存在</li>
+        ${hlNote}
       </ul>
       <p class="diff-hint">合并：只补新内容，不动本地；覆盖本地：以备份为准（备份里没有的类别保留本地）。</p>`;
     modalEl.hidden = false;
@@ -566,25 +598,27 @@
   $("modal-ok").addEventListener("click", async () => {
     if (!pendingRestore) return;
     const p = pendingRestore;
-    const map = new Map(p.curItems.map((x) => [x.id, x]));
-    p.addItems.forEach((x) => map.set(x.id, x));
-    const mergedItems = [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
+    // 收藏交给 background 现读现写：弹窗开着时别的标签页存的内容不会被旧快照抹掉
+    const res = await API.runtime.sendMessage({ type: "clipkeep:merge", payload: { items: p.inItems } });
+    if (!res || !res.ok) return toast("合并失败，请重试");
     const hmap = new Map(p.curHl.map((x) => [hlKeyOf(x), x]));
     p.addHl.forEach((x) => hmap.set(hlKeyOf(x), x));
-    await writeBoth(mergedItems, [...hmap.values()]);
+    if (hmap.size !== p.curHl.length) await API.storage.local.set({ [HL_KEY]: [...hmap.values()] });
     closeRestoreModal();
     await load();
-    toast(`已合并：新增 ${p.addItems.length} 收藏 · ${p.addHl.length} 高亮`);
+    toast(`已合并：新增 ${res.added} 收藏 · ${p.addHl.length} 高亮`);
   });
   $("modal-alt").addEventListener("click", async () => {
     if (!pendingRestore) return;
     const p = pendingRestore;
     if (p.localOnly.length && !confirm(`备份里没有这 ${p.localOnly.length} 条本地内容，覆盖后将丢失。继续？`)) return;
-    const itemsArr = p.inItems.slice().sort((a, b) => b.createdAt - a.createdAt);
-    await writeBoth(p.inItems.length ? itemsArr : p.curItems, p.inHl);
+    // 备份没提到的类别保留本地，避免「覆盖」把高亮批注悄悄清空
+    const itemsArr = (p.inItems.length ? p.inItems : p.curItems).slice().sort((a, b) => b.createdAt - a.createdAt);
+    const hlArr = p.inHl.length ? p.inHl : p.curHl;
+    await writeBoth(itemsArr, hlArr);
     closeRestoreModal();
     await load();
-    toast(`已用备份覆盖：共 ${p.inItems.length} 收藏 · ${p.inHl.length} 高亮`);
+    toast(`已用备份覆盖：共 ${itemsArr.length} 收藏 · ${hlArr.length} 高亮`);
   });
 
   $("btn-backup").addEventListener("click", backup);

@@ -24,6 +24,7 @@
       try {
         API.runtime.sendMessage(msg, (res) => resolve(res || { ok: false }));
       } catch (e) {
+        silentStorageDead(e);
         resolve({ ok: false });
       }
     });
@@ -50,15 +51,51 @@
 
   /* ---------- 高亮存储 ---------- */
 
-  async function getHighlights() {
-    const o = await API.storage.local.get(HL_KEY);
-    return Array.isArray(o[HL_KEY]) ? o[HL_KEY] : [];
+  // 扩展更新 / 重新加载后，旧 content script 的 storage 调用会全部失效
+  let contextLost = false;
+  const RELOAD_HINT = "ClipKeep 已更新，请刷新页面后继续使用";
+  const STORE_HINT = "保存失败：本地存储不可用，请稍后重试";
+
+  function noteStorageDead(err) {
+    const s = String((err && err.message) || err || "");
+    if (/invalidated|context|deleted/i.test(s)) contextLost = true;
+    toast(contextLost ? RELOAD_HINT : STORE_HINT);
   }
+  function silentStorageDead(err) {
+    const s = String((err && err.message) || err || "");
+    if (/invalidated|context|deleted/i.test(s)) contextLost = true;
+  }
+
+  /** 读不到时返回 null（区别于「真的没有高亮」），调用方必须放弃本次改动 */
+  async function getHighlights() {
+    if (contextLost) return null;
+    try {
+      const o = await API.storage.local.get(HL_KEY);
+      return Array.isArray(o[HL_KEY]) ? o[HL_KEY] : [];
+    } catch (e) {
+      silentStorageDead(e);
+      return null;
+    }
+  }
+  /** 返回 false 表示没写进去，调用方要回滚界面 */
   async function setHighlights(list) {
-    await API.storage.local.set({ [HL_KEY]: list });
+    if (contextLost) { toast(RELOAD_HINT); return false; }
+    try {
+      await API.storage.local.set({ [HL_KEY]: list });
+      return true;
+    } catch (e) {
+      noteStorageDead(e);
+      return false;
+    }
   }
   function makeId() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+  // 同一页面跳到 #锚点 时 location.href 会变，比对时去掉片段标识
+  function normUrl(u) {
+    const s = String(u || "");
+    const i = s.indexOf("#");
+    return i < 0 ? s : s.slice(0, i);
   }
 
   /* ---------- 浮动工具条 ---------- */
@@ -253,13 +290,15 @@
     }
     const id = makeId();
     const color = COLORS[colorKey] || COLORS.yellow;
+    const mark = makeMark(id, color, note);
     try {
-      wrapRange(sel.range, makeMark(id, color, note));
+      wrapRange(sel.range, mark);
     } catch (e) {
       toast("该处无法高亮");
       return;
     }
     const list = await getHighlights();
+    if (!list) { unwrapMark(mark); return; } // 读不到就别覆盖，否则会清空别人的高亮
     list.push({
       id,
       url: location.href,
@@ -268,9 +307,25 @@
       note: note || "",
       createdAt: Date.now(),
     });
-    await setHighlights(list);
+    if (!(await setHighlights(list))) { unwrapMark(mark); return; }
     window.getSelection().removeAllRanges();
     toast(note ? "已批注 ✓" : "已高亮 ✓");
+  }
+
+  /** 拆掉一个标记，把里面的原文放回原位 */
+  function unwrapMark(mark) {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+  }
+
+  /** 还原页面上所有 ClipKeep 标记，供重放前复位 */
+  function unwrapAllMarks() {
+    const marks = [...document.querySelectorAll("." + NS + "-hl")];
+    marks.forEach(unwrapMark);
+    if (marks.length && document.body && document.body.normalize) document.body.normalize();
+    return marks.length;
   }
 
   function openNoteForRange(sel) {
@@ -296,21 +351,23 @@
     };
   }
 
-  // 在单个文本节点内查找并包裹（用于刷新后重放高亮）
-  function reapplyOne(node, hl) {
-    const val = node.nodeValue;
-    const idx = val.indexOf(hl.text);
-    if (idx < 0) return false;
+  // 在文本节点内从 idx 起包裹 len 个字符（用于刷新后重放高亮）
+  function wrapAt(node, idx, len, mark) {
     const range = document.createRange();
     range.setStart(node, idx);
-    range.setEnd(node, idx + hl.text.length);
-    range.surroundContents(makeMark(hl.id, COLORS[hl.color] || COLORS.yellow, hl.note));
-    return true;
+    range.setEnd(node, idx + len);
+    wrapRange(range, mark);
   }
 
   async function applyHighlights() {
+    if (contextLost) return;
     const list = await getHighlights();
-    const mine = list.filter((h) => h.url === location.href);
+    if (!list) return;
+    const pageKey = normUrl(location.href);
+    const mine = list.filter((h) => normUrl(h.url) === pageKey && h.text);
+    // 先全部还原再按存储重放：别处删掉的高亮不会留下点不动的幽灵标记，
+    // 改过的批注和颜色也能同步。normalize() 让上一次包裹切碎的文本节点重新合并
+    if (unwrapAllMarks()) document.body.normalize();
     if (!mine.length) return;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(n) {
@@ -323,14 +380,23 @@
     const remaining = mine.slice();
     let node;
     while ((node = walker.nextNode()) && remaining.length) {
-      for (let i = remaining.length - 1; i >= 0; i--) {
-        if (node.nodeValue.indexOf(remaining[i].text) >= 0) {
-          // 每次只处理该节点一次，避免 walker 失效
-          const hl = remaining[i];
-          remaining.splice(i, 1);
-          reapplyOne(node, hl);
-          break;
+      const hits = [];
+      for (let i = 0; i < remaining.length; i++) {
+        const idx = node.nodeValue.indexOf(remaining[i].text);
+        if (idx >= 0) hits.push({ idx, hl: remaining[i] });
+      }
+      if (!hits.length) continue;
+      // 从后往前包裹：包裹会切碎当前节点，靠后的区间先落地才不会互相踩掉
+      hits.sort((a, b) => b.idx - a.idx);
+      for (const h of hits) {
+        const len = h.hl.text.length;
+        if (h.idx + len > node.nodeValue.length) continue; // 与已落地的区间重叠，留给别的节点
+        try {
+          wrapAt(node, h.idx, len, makeMark(h.hl.id, COLORS[h.hl.color] || COLORS.yellow, h.hl.note));
+        } catch (_) {
+          continue;
         }
+        remaining.splice(remaining.indexOf(h.hl), 1);
       }
     }
   }
@@ -342,25 +408,27 @@
     e.preventDefault();
     const id = mark.dataset.hlid;
     const list = await getHighlights();
+    if (!list) return;
     const hl = list.find((h) => h.id === id);
-    if (!hl) return;
+    if (!hl) { unwrapMark(mark); return; } // 存储里已删除：顺手清掉页面上的残留
     const action = prompt(
-      "ClipKeep 批注：" + (hl.note || "（无）") + "\n\n输入新批注内容并回车保存；输入 d 回车删除该高亮。",
+      "ClipKeep 批注：" + (hl.note || "（无）") + "\n\n输入新批注内容并回车保存；输入 !d 回车删除该高亮。",
       hl.note || ""
     );
     if (action === null) return;
-    if (action.trim().toLowerCase() === "d") {
-      const parent = mark.parentNode;
-      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-      parent.removeChild(mark);
-      await setHighlights(list.filter((h) => h.id !== id));
-      toast("已删除高亮");
+    if (action.trim().toLowerCase() === "!d") {
+      // 先写存储，成功后再改页面：失败时标记还在，和存储保持一致
+      if (await setHighlights(list.filter((h) => h.id !== id))) {
+        unwrapMark(mark);
+        toast("已删除高亮");
+      }
     } else {
-      hl.note = action.trim();
-      mark.title = hl.note ? "ClipKeep 批注：" + hl.note : "";
-      mark.classList.toggle("has-note", !!hl.note);
-      await setHighlights(list);
-      toast("批注已更新 ✓");
+      const note = action.trim();
+      if (await setHighlights(list.map((h) => (h.id === id ? { ...h, note } : h)))) {
+        mark.title = note ? "ClipKeep 批注：" + note : "";
+        mark.classList.toggle("has-note", !!note);
+        toast("批注已更新 ✓");
+      }
     }
   }, true);
 
