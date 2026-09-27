@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # 生成 ClipKeep README 演示动图（界面示意 mockup）
-# v1.3：高亮/批注 + 高亮总览 + 删除撤销 + 回顾 + 搜索命中高亮 + 标签管理 + 设置 + 恢复差异 + 快捷键秒存
+# v1.4：高亮/批注 + 高亮总览 + 删除撤销 + 回顾热力图 + 重复收藏提示 + 搜索命中高亮 + 标签管理 + 设置 + 恢复差异 + 快捷键秒存
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 960, 600
@@ -245,7 +245,7 @@ def popup_settings(d):
     x, y, w, h = popup_shell(d)
     popup_tabs(d, x, y, w, 0)
     d.text([x+16, y+102], "设置", font=f(12, True), fill=INK)
-    rrect(d, [x+16, y+126, x+w-16, y+292], 12, fill=CARD, outline=LINE, width=1)
+    rrect(d, [x+16, y+126, x+w-16, y+322], 12, fill=CARD, outline=LINE, width=1)
     d.text([x+30, y+142], "每日回顾上限", font=f(13), fill=INK)
     rrect(d, [x+w-96, y+138, x+w-32, y+164], 7, fill=(249,250,251), outline=LINE, width=1)
     d.text([x+w-80, y+143], "20", font=f(13), fill=INK)
@@ -259,11 +259,16 @@ def popup_settings(d):
               outline=None if active else LINE, width=0 if active else 1)
         d.text([mx+8, y+208], m, font=f(12), fill=(255,255,255) if active else MUTED)
     d.text([x+30, y+238], "倍率越大，下次复习排得越远", font=f(11), fill=MUTED)
-    rrect(d, [x+16, y+312, x+w-16, y+372], 12, fill=SOFT, outline=LINE, width=1)
-    d.text([x+30, y+324], "秒存选区", font=f(13, True), fill=INK)
-    rrect(d, [x+30, y+346, x+150, y+366], 6, fill=CARD, outline=(203,213,225), width=1)
-    d.text([x+40, y+348], "Alt+Shift+K", font=f(12), fill=INK)
-    d.text([x+162, y+348], "选中文字直接入库", font=f(11), fill=MUTED)
+    d.line([x+30, y+262, x+w-30, y+262], fill=LINE, width=1)
+    d.text([x+30, y+272], "回收站保留", font=f(13), fill=INK)
+    rrect(d, [x+w-110, y+268, x+w-32, y+292], 7, fill=(249,250,251), outline=LINE, width=1)
+    d.text([x+w-100, y+273], "30 分钟 ▾", font=f(12), fill=INK)
+    d.text([x+30, y+298], "删除后多久内还能撤销", font=f(11), fill=MUTED)
+    rrect(d, [x+16, y+344, x+w-16, y+404], 12, fill=SOFT, outline=LINE, width=1)
+    d.text([x+30, y+356], "秒存选区", font=f(13, True), fill=INK)
+    rrect(d, [x+30, y+378, x+150, y+398], 6, fill=CARD, outline=(203,213,225), width=1)
+    d.text([x+40, y+380], "Alt+Shift+K", font=f(12), fill=INK)
+    d.text([x+162, y+380], "选中文字直接入库", font=f(11), fill=MUTED)
     popup_footer(d, x, y, w, h)
 
 def restore_modal(d):
@@ -291,28 +296,49 @@ def restore_modal(d):
 
 def page_toast(d, text, key=False):
     """页面底部居中的提示条：快捷键说明 + 结果反馈（无 emoji，避免缺字）"""
-    if not key:
-        return
-    label = "Alt+Shift+K  秒存选中的文字  →  " + text
+    label = ("Alt+Shift+K  秒存选中的文字  →  " if key else "") + text
     fnt = f(15)
     tw = d.textlength(label, font=fnt)
     px, py, ph = (W - tw) / 2 - 26, 486, 44
     rrect(d, [px, py, px + tw + 52, py + ph], 22, fill=(17, 24, 39))
     d.text([px + 26, py + 12], label, font=fnt, fill=(255, 255, 255))
 
+HEAT = [  # v1.4 回顾热力图：8 周 × 7 天，0 未复习 / 1–3 复习量递增
+    [0, 1, 2, 1, 0, 3, 1],
+    [1, 0, 2, 3, 1, 0, 2],
+    [2, 1, 0, 1, 3, 2, 1],
+    [0, 3, 2, 1, 0, 2, 3],
+    [1, 2, 3, 2, 1, 3, 2],
+    [0, 1, 0, 2, 3, 1, 2],
+    [2, 3, 1, 0, 2, 3, 1],
+    [3, 2, 1, 3, 0, 2, 0],
+]
+HEAT_LVL = {0: (238, 241, 245), 1: (191, 219, 254), 2: (96, 165, 250), 3: (29, 78, 216)}
+
+def heat_grid(d, gx, gy):
+    """右上角的 8 周打卡格（格子 8px，间距 2px）"""
+    for wk, col in enumerate(HEAT):
+        for dy, lvl in enumerate(col):
+            x0 = gx + wk * 10
+            y0 = gy + dy * 10
+            d.rectangle([x0, y0, x0 + 8, y0 + 8], fill=HEAT_LVL[lvl],
+                         outline=None if lvl == 0 else HEAT_LVL[0], width=1)
+
 def popup_review(d, revealed=False):
     x, y, w, h = popup_shell(d)
     popup_tabs(d, x, y, w, 2)
+    heat_grid(d, x + w - 94, y + 94)
     d.text([x+16, y+102], "待回顾 2 条 · 记忆盒 1/5", font=f(12), fill=MUTED)
-    cy = y + 128
-    ch = 300 if revealed else 210
+    d.text([x+16, y+126], "本周 14 · 连续 6 天", font=f(11), fill=(156,163,175))
+    cy = y + 170
+    ch = 250 if revealed else 204
     rrect(d, [x+16, cy, x+w-16, cy+ch], 14, fill=CARD, outline=LINE, width=1)
-    d.multiline_text([x+36, cy+26], "量子比特可以同时处于\n0 和 1 的叠加态，\n这是量子计算超越经典\n计算的根本原因。", font=f(15), fill=INK, spacing=10)
+    d.multiline_text([x+36, cy+22], "量子比特可以同时处于\n0 和 1 的叠加态，\n这是量子计算超越经典\n计算的根本原因。", font=f(15), fill=INK, spacing=6)
     if revealed:
-        d.line([x+36, cy+146, x+w-36, cy+146], fill=LINE, width=1)
-        d.rectangle([x+36, cy+162, x+39, cy+196], fill=BLUE)
-        d.text([x+48, cy+164], "标签：量子计算 / 重点", font=f(12), fill=INK)
-        d.text([x+48, cy+182], "来源：example.com", font=f(12), fill=MUTED)
+        d.line([x+36, cy+142, x+w-36, cy+142], fill=LINE, width=1)
+        d.rectangle([x+36, cy+156, x+39, cy+190], fill=BLUE)
+        d.text([x+48, cy+158], "标签：量子计算 / 重点", font=f(12), fill=INK)
+        d.text([x+48, cy+176], "来源：example.com", font=f(12), fill=MUTED)
         labels = [("忘记", RED), ("记得", BLUE), ("简单", GREEN)]
         for i, (label, col) in enumerate(labels):
             bx = x + 36 + i*98
@@ -343,7 +369,7 @@ im, d, _ = base(); popup_clips(d);
 x, y, w, h = 560, 90, 360, 460
 popup_footer(d, x, y, w, h, toast="已导出 3 条"); frames.append(im.copy())
 
-# 场景5：每日回顾（间隔重复）
+# 场景5：每日回顾（间隔重复 + 8 周热力图）
 im, d, _ = base(); popup_review(d); frames.append(im.copy())
 im, d, _ = base(); popup_review(d, revealed=True); frames.append(im.copy())
 
@@ -362,12 +388,15 @@ im, d, _ = base(); selection(d); page_toast(d, "已存入 ClipKeep", key=True); 
 im, d, _ = base(); popup_marks(d); frames.append(im.copy())
 im, d, _ = base(); popup_marks(d, toast="已导出 2 条高亮"); frames.append(im.copy())
 
-# 场景10：v1.3 —— 删错了能撤销（10 分钟回收站）
+# 场景10：v1.3 —— 删错了能撤销（回收站，保留时长在 ⚙ 可选）
 im, d, _ = base(); popup_clips(d, undo=True); frames.append(im.copy())
 im, d, _ = base(); popup_clips(d, toast="已撤销删除 ✓"); frames.append(im.copy())
 
+# 场景11：v1.4 —— 重复收藏不再静默入库
+im, d, _ = base(); selection(d); page_toast(d, "这条已经在收藏里了"); frames.append(im.copy())
+
 durations = [700, 800, 1200, 1200, 900, 1000, 1000, 1100, 1000, 1800, 1200, 1300, 1200, 1400, 1600,
-             1600, 1200, 1500, 1200]
+             1600, 1200, 1500, 1200, 1800]
 assert len(durations) == len(frames), f"durations({len(durations)}) != frames({len(frames)})"
 frames[0].save(
     "/Users/liuxin/Documents/开源项目/ClipKeep/docs/demo.gif",

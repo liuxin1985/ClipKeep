@@ -10,9 +10,13 @@
   const HL_KEY = "clipkeep_highlights";
   const TRASH_KEY = "clipkeep_trash";
   const PREFS_KEY = "clipkeep_prefs";
+  const ACTIVITY_KEY = "clipkeep_activity"; // 每天回顾了多少条，画热力图用
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
-  const DEFAULT_PREFS = { review: { cap: 20, mult: 1 } };
+  const HEAT_WEEKS = 8; // 热力图展示最近 8 周
+  const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长
+  const DEFAULT_TRASH_MINS = 10;
+  const DEFAULT_PREFS = { review: { cap: 20, mult: 1 }, trash: { mins: DEFAULT_TRASH_MINS } };
 
   const $ = (id) => document.getElementById(id);
   const listEl = $("list");
@@ -35,7 +39,8 @@
 
   let items = [];
   let marks = []; // 网页高亮 / 批注
-  let trash = []; // 最近删除的收藏 / 高亮，10 分钟内可撤销
+  let trash = []; // 最近删除的收藏 / 高亮，保留时长见设置
+  let activity = {}; // { "2026-09-27": 5 } 每日回顾条数
   let prefs = DEFAULT_PREFS;
   let activeTag = "";
   let view = "clips";
@@ -86,10 +91,12 @@
   /* ---------- 复习调度（Leitner 盒） ---------- */
 
   function reviewPrefs() {
-    const r = (prefs && prefs.review) || {};
-    const cap = Math.max(1, Math.min(200, Number(r.cap) || DEFAULT_PREFS.review.cap));
-    const mult = [0.5, 1, 2].indexOf(Number(r.mult)) >= 0 ? Number(r.mult) : DEFAULT_PREFS.review.mult;
-    return { cap, mult };
+    return reviewPrefsOf(prefs);
+  }
+
+  /** 回收站保留时长：只认档位，非法值回落到默认，别让人把回收站调成永久 */
+  function trashMins() {
+    return trashMinsOf(prefs);
   }
 
   function ensureReview(it) {
@@ -122,10 +129,12 @@
   /* ---------- 数据加载 ---------- */
 
   async function load() {
-    const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY, PREFS_KEY]);
+    const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY, PREFS_KEY, ACTIVITY_KEY]);
     items = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
     marks = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
     prefs = obj[PREFS_KEY] || {};
+    const log = obj[ACTIVITY_KEY];
+    activity = log && typeof log === "object" && !Array.isArray(log) ? log : {};
     trash = await readTrash();
     applyTheme(prefs.dark ? "dark" : "light");
     syncSettings();
@@ -151,14 +160,33 @@
     const { cap, mult } = reviewPrefs();
     $("set-cap").value = String(cap);
     $("set-mult").value = String(mult);
+    $("set-ttl").value = String(trashMins());
   }
 
-  async function saveReviewPrefs(patch) {
-    prefs = { ...prefs, review: { ...reviewPrefs(), ...patch } };
-    prefs = { ...prefs, review: reviewPrefs() }; // 统一走同一套夹取规则再落盘
+  /**
+   * 偏好统一从这里写：一次读全量、按档位夹一遍再落盘，
+   * 避免各面板各改各的字段互相覆盖。
+   */
+  async function savePrefs(section, patch) {
+    const next = { ...prefs, [section]: { ...(prefs[section] || {}), ...patch } };
+    next.review = reviewPrefsOf(next);
+    next.trash = { mins: trashMinsOf(next) };
+    prefs = next;
     await API.storage.local.set({ [PREFS_KEY]: prefs });
     syncSettings();
     render();
+  }
+
+  function reviewPrefsOf(p) {
+    const r = (p && p.review) || {};
+    const cap = Math.max(1, Math.min(200, Number(r.cap) || DEFAULT_PREFS.review.cap));
+    const mult = [0.5, 1, 2].indexOf(Number(r.mult)) >= 0 ? Number(r.mult) : DEFAULT_PREFS.review.mult;
+    return { cap, mult };
+  }
+
+  function trashMinsOf(p) {
+    const m = Number((p && p.trash || {}).mins);
+    return TRASH_MINS.indexOf(m) >= 0 ? m : DEFAULT_TRASH_MINS;
   }
 
   function applyTheme(mode) {
@@ -406,7 +434,7 @@
     if (!trash.length) return;
     const kinds = new Set(trash.map((t) => (t && t.kind === "hl" ? "高亮" : "收藏")));
     const what = kinds.size === 1 ? [...kinds][0] : "";
-    trashTextEl.textContent = `已删除 ${trash.length} 条${what} · 10 分钟内可撤销`;
+    trashTextEl.textContent = `已删除 ${trash.length} 条${what} · ${trashMins()} 分钟内可撤销`;
   }
 
   $("btn-undo").addEventListener("click", async () => {
@@ -499,8 +527,65 @@
     settingsEl.hidden = !settingsEl.hidden;
     $("btn-settings").classList.toggle("active", !settingsEl.hidden);
   });
-  $("set-cap").addEventListener("change", (e) => saveReviewPrefs({ cap: Number(e.target.value) }));
-  $("set-mult").addEventListener("change", (e) => saveReviewPrefs({ mult: Number(e.target.value) }));
+  $("set-cap").addEventListener("change", (e) => savePrefs("review", { cap: Number(e.target.value) }));
+  $("set-mult").addEventListener("change", (e) => savePrefs("review", { mult: Number(e.target.value) }));
+  $("set-ttl").addEventListener("change", (e) => savePrefs("trash", { mins: Number(e.target.value) }));
+
+  /* ---------- 回顾热力图 ---------- */
+
+  function dayKey(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+  /** 档位：0 空白 / 1 少量 / 2 一般 / 3 较多 */
+  function heatLvl(n) {
+    return n <= 0 ? 0 : n < 3 ? 1 : n < 6 ? 2 : 3;
+  }
+
+  /** 8 周 × 7 天，按星期对齐（每列一周，周日到周六），本周末端之后的天留空格 */
+  function heatCells() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = today.getTime() - ((HEAT_WEEKS - 1) * 7 + today.getDay()) * DAY;
+    const cells = [];
+    for (let i = 0; i < HEAT_WEEKS * 7; i++) {
+      const t = start + i * DAY;
+      const key = dayKey(t);
+      cells.push({ key, n: Number(activity[key]) || 0, future: t > today.getTime() });
+    }
+    return cells;
+  }
+
+  function heatHtml() {
+    const cells = heatCells();
+    const weekAgo = Date.now() - 7 * DAY;
+    const week = cells.reduce((s, c) => (c.future || Date.parse(c.key) < weekAgo ? s : s + c.n), 0);
+    const total = Object.keys(activity).reduce((s, k) => s + (Number(activity[k]) || 0), 0);
+    let streak = 0;
+    for (let i = cells.length - 1; i >= 0; i--) {
+      const c = cells[i];
+      if (c.future) continue;
+      if (c.n > 0) streak++;
+      else break;
+    }
+    const grid = cells
+      .map((c) => {
+        const cls = c.future ? " future" : "";
+        const tip = `${c.key}${c.n ? ` · 回顾 ${c.n} 条` : ""}`;
+        return `<i class="lv${heatLvl(c.n)}${cls}" data-day="${c.key}" data-lvl="${heatLvl(c.n)}" title="${esc(tip)}"></i>`;
+      })
+      .join("");
+    return `
+      <div class="heat-wrap">
+        <div class="heat-head">
+          <span class="heat-title">🔥 回顾打卡</span>
+          <span class="heat-stats" id="heat-stats">本周 ${week} · 连续 ${streak} 天 · 累计 ${total}</span>
+        </div>
+        <div class="heat">${grid}</div>
+      </div>`;
+  }
 
   /* ---------- 回顾视图 ---------- */
 
@@ -508,13 +593,14 @@
     const { cap } = reviewPrefs();
     const due = dueItems();
     const queued = queue();
+    const heat = heatHtml();
     if (!items.length) {
-      reviewEl.innerHTML = `<div class="empty"><div class="empty-ico">🔁</div><p>还没有可回顾的内容</p><span>先去网页上划词收藏几条吧。</span></div>`;
+      reviewEl.innerHTML = heat + `<div class="empty"><div class="empty-ico">🔁</div><p>还没有可回顾的内容</p><span>先去网页上划词收藏几条吧。</span></div>`;
       return;
     }
     if (!queued.length) {
       const next = items.map((it) => ensureReview(it).due).sort((a, b) => a - b)[0];
-      reviewEl.innerHTML = `<div class="empty done"><div class="empty-ico">🎉</div><p>今日回顾已完成</p><span>下一条将在 ${fmtDate(next)} 到期。明天再来 ~</span></div>`;
+      reviewEl.innerHTML = heat + `<div class="empty done"><div class="empty-ico">🎉</div><p>今日回顾已完成</p><span>下一条将在 ${fmtDate(next)} 到期。明天再来 ~</span></div>`;
       return;
     }
     const it = queued[0];
@@ -522,7 +608,7 @@
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
     const link = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title || hostname(it.url))}</a>` : "";
     const capNote = due.length > queued.length ? ` · 今日上限 ${cap} 条，剩余 ${due.length - queued.length} 条明天继续` : "";
-    reviewEl.innerHTML = `
+    reviewEl.innerHTML = heat + `
       <div class="rev-progress">本组待回顾 ${queued.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}${capNote}</div>
       <div class="rev-card" data-id="${esc(it.id)}">
         <div class="rev-front">${esc(it.text)}</div>
@@ -558,14 +644,14 @@
       const btns = [...reviewEl.querySelectorAll(".rev-grade button")];
       btns.forEach((b) => { b.disabled = true; });
       grade(it, Number(btn.dataset.g));
-      let res;
+      let res = null;
       try {
-        res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { review: it.review } });
+        // 排期 + 当日打卡由后台一次写链完成，不会出现「分数存了、热力图没加」
+        res = await API.runtime.sendMessage({ type: "clipkeep:grade", id, review: it.review });
+        await load(); // 以存储为准：保存失败时把本地改动丢掉，不留下和存储不一致的排期
       } finally {
-        grading = false;
-        btns.forEach((b) => { b.disabled = false; }); // 失败时卡片还在，要能重试
+        grading = false; // 刷新完成后才交还点击权；卡片重渲染后按钮自然是可用状态
       }
-      await load(); // 以存储为准：保存失败时把本地改动丢掉，不留下和存储不一致的排期
       if (!res || !res.ok) toast("打分保存失败，已还原，请重试");
     }
   });
@@ -582,10 +668,18 @@
     if (!it) return;
     const act = btn.dataset.act;
     if (act === "copy") copyText(it.text);
-    else if (act === "del") { await API.runtime.sendMessage({ type: "clipkeep:delete", id }); await load(); toast("已删除"); }
+    else if (act === "del") {
+      // 提示要跟着真实结果走：后台没写成功就不能报「已删除」
+      const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
+      await load();
+      toast(res && res.ok ? "已删除，可撤销" : "删除失败，请重试");
+    }
     else if (act === "tag") {
       const val = prompt("输入标签，用逗号分隔：", (it.tags || []).join(","));
-      if (val !== null) { await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { tags: val } }); await load(); }
+      if (val === null) return;
+      const res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { tags: val } });
+      await load();
+      toast(res && res.ok ? "标签已更新" : "保存失败，请重试");
     } else if (act === "export") {
       download(mdOf([it]), `clipkeep-${it.id}.md`);
     }
@@ -860,7 +954,7 @@
   if (API.storage && API.storage.onChanged) {
     API.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if (changes[STORAGE_KEY] || changes[HL_KEY] || changes[PREFS_KEY] || changes[TRASH_KEY]) load();
+      if (changes[STORAGE_KEY] || changes[HL_KEY] || changes[PREFS_KEY] || changes[TRASH_KEY] || changes[ACTIVITY_KEY]) load();
     });
   }
 

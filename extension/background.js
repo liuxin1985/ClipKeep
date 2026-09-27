@@ -11,8 +11,12 @@ const STORAGE_KEY = "clipkeep_items";
 const HL_KEY = "clipkeep_highlights";
 const TRASH_KEY = "clipkeep_trash";
 const PREFS_KEY = "clipkeep_prefs";
+const ACTIVITY_KEY = "clipkeep_activity"; // 每天回顾了多少条，用于热力图
 const MAX_TEXT = 20000; // 单次收藏的文本上限，避免一次粘贴撑爆本地存储
-const TRASH_TTL = 10 * 60 * 1000; // 回收站保留 10 分钟
+const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长（分钟）
+const DEFAULT_TRASH_MINS = 10;
+const ACTIVITY_DAYS = 120; // 活动记录只留最近 120 天
+const INTERVALS = 6; // 记忆盒数量，用于把外部数据的盒号夹到合法区间
 const HL_COLORS = ["yellow", "green", "pink", "blue"];
 const SAFE_ID = /^[\w-]{1,64}$/; // 外部数据的 id 只允许安全字符，避免拼进 HTML 时越出属性
 
@@ -22,6 +26,12 @@ async function readList(key) {
   const obj = await API.storage.local.get(key);
   const list = obj[key];
   return Array.isArray(list) ? list : [];
+}
+
+/** 非列表数据（活动记录之类）走这个，别被 readList 的「不是数组就当空」吞掉 */
+async function readRaw(key) {
+  const obj = await API.storage.local.get(key);
+  return obj[key];
 }
 
 /**
@@ -58,15 +68,24 @@ function makeId() {
 
 /* ---------------- 回收站（删除可撤销） ---------------- */
 
-function pruneTrash(trash) {
+function trashTtlMs() {
+  // 处在写链内，直接读 prefs 不会和别的步骤抢同一条 key
+  return API.storage.local.get(PREFS_KEY).then((o) => {
+    const mins = o && o[PREFS_KEY] && Number(o[PREFS_KEY].trash && o[PREFS_KEY].trash.mins);
+    return (TRASH_MINS.indexOf(mins) >= 0 ? mins : DEFAULT_TRASH_MINS) * 60 * 1000;
+  });
+}
+
+function pruneTrash(trash, ttlMs) {
   const now = Date.now();
-  return trash.filter((t) => t && t.item && now - (Number(t.deletedAt) || 0) <= TRASH_TTL);
+  const ttl = ttlMs === undefined ? DEFAULT_TRASH_MINS * 60 * 1000 : ttlMs;
+  return trash.filter((t) => t && t.item && now - (Number(t.deletedAt) || 0) <= ttl);
 }
 
 /** 把删除的内容放进回收站；调用方已处于写链中，这里直接读写 */
 async function pushTrash(entries) {
-  const trash = await readList(TRASH_KEY);
-  await API.storage.local.set({ [TRASH_KEY]: pruneTrash(entries.concat(trash)) });
+  const [trash, ttl] = await Promise.all([readList(TRASH_KEY), trashTtlMs()]);
+  await API.storage.local.set({ [TRASH_KEY]: pruneTrash(entries.concat(trash), ttl) });
 }
 
 function trashEntry(kind, item) {
@@ -93,6 +112,49 @@ function normalizeTags(tags) {
   return [...new Set(arr.map((t) => String(t).trim()).filter(Boolean))].slice(0, 12);
 }
 
+/** 排期：盒号夹到合法区间，时间戳非法时视为立即到期 */
+function cleanReview(r) {
+  if (!r || typeof r !== "object") return undefined;
+  const box = Math.max(0, Math.min(INTERVALS - 1, Math.floor(Number(r.box)) || 0));
+  const due = Number(r.due);
+  const seen = Math.max(0, Math.floor(Number(r.seen)) || 0);
+  return { box, due: Number.isFinite(due) && due > 0 ? due : Date.now(), seen };
+}
+
+/**
+ * 备份、旧版本、手改过的存储都算外部数据：入库前统一洗一遍。
+ * 弹窗侧的归一化只是善意路径，后台才是最后一道关。
+ */
+function cleanItem(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const text = String(raw.text === undefined || raw.text === null ? "" : raw.text).trim();
+  if (!text) return null;
+  const rawId = String(raw.id === undefined || raw.id === null ? "" : raw.id);
+  const item = {
+    id: SAFE_ID.test(rawId) ? rawId : makeId(),
+    text: text.slice(0, MAX_TEXT),
+    note: String(raw.note === undefined || raw.note === null ? "" : raw.note),
+    tags: normalizeTags(raw.tags),
+    url: String(raw.url || ""),
+    title: String(raw.title || ""),
+    createdAt: Number(raw.createdAt) || Date.now(),
+  };
+  if (item.text.length > MAX_TEXT) item.truncated = true;
+  const review = cleanReview(raw.review);
+  if (review) item.review = review;
+  return item;
+}
+
+/** 同一条内容是否已经存过：来源、正文、备注、标签全同才算重复 */
+function sameAs(a, b) {
+  return (
+    (a.url || "") === (b.url || "") &&
+    a.text === b.text &&
+    (a.note || "") === (b.note || "") &&
+    (a.tags || []).join("\n") === (b.tags || []).join("\n")
+  );
+}
+
 function addItem(payload) {
   const raw = ((payload && payload.text) || "").trim();
   if (!raw) return Promise.resolve({ ok: false, error: "empty" });
@@ -107,6 +169,9 @@ function addItem(payload) {
   };
   if (raw.length > MAX_TEXT) item.truncated = true;
   return mutate((items) => {
+    const dup = items.find((it) => it && sameAs(it, item));
+    // 划两次就把同一个句子存两遍，是这类工具最常见的误操作
+    if (dup) return { result: { ok: true, dup: true, item: dup, count: items.length } };
     items.unshift(item);
     return { write: true, items, result: { ok: true, item, count: items.length } };
   });
@@ -118,7 +183,7 @@ function deleteItem(id) {
     if (idx === -1) return { result: { ok: true, count: items.length } };
     const entry = trashEntry("clip", items[idx]);
     items.splice(idx, 1);
-    await pushTrash([entry]); // 删除进回收站，10 分钟内可撤销
+    await pushTrash([entry]); // 删除进回收站，⚙ 设置的保留时长内可撤销
     return { write: true, items, result: { ok: true, count: items.length, trashed: true, tid: entry.tid } };
   });
 }
@@ -141,6 +206,50 @@ function updateItem(id, patch) {
 
 function clearAll() {
   return mutate(() => ({ write: true, items: [], result: { ok: true } }));
+}
+
+/* ---------------- 回顾打分 + 打卡活动 ---------------- */
+
+/** 本地日期键，形如 2026-09-27 */
+function dayKey(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 排期必须由后台说了算的字段：盒号/到期时间得是有限数，否则视为非法请求 */
+function validReview(r) {
+  return (
+    r && typeof r === "object" &&
+    Number.isFinite(Number(r.box)) && Number(r.box) >= 0 &&
+    Number.isFinite(Number(r.due)) && Number(r.due) > 0
+  );
+}
+
+/**
+ * 打分：更新排期 + 记一次当日回顾活动。
+ * 两件事在同一条写链的一步里完成，不会出现「分数存了、热力图没加」的半更新。
+ */
+function gradeItem(id, review) {
+  if (!validReview(review)) return Promise.resolve({ ok: false, error: "invalid" });
+  return mutate(async (items) => {
+    const idx = items.findIndex((it) => it && it.id === id);
+    if (idx === -1) return { result: { ok: false, error: "not_found" } };
+    items[idx] = { ...items[idx], review: cleanReview(review) };
+    const day = dayKey(Date.now());
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const cutoff = today.getTime() - ACTIVITY_DAYS * 86400000;
+    const activity = await readRaw(ACTIVITY_KEY); // 活动记录是按日期的对象，不是列表
+    const log = (activity && typeof activity === "object" && !Array.isArray(activity)) ? activity : {};
+    for (const k of Object.keys(log)) {
+      const t = Date.parse(k);
+      if (!Number.isFinite(t) || t < cutoff || !(Number(log[k]) > 0)) delete log[k];
+    }
+    log[day] = (Number(log[day]) || 0) + 1;
+    await API.storage.local.set({ [ACTIVITY_KEY]: log });
+    return { write: true, items, result: { ok: true, day, count: log[day] } };
+  });
 }
 
 /* ---------------- 高亮 / 批注（统一由后台串行写） ---------------- */
@@ -204,8 +313,8 @@ function deleteHighlight(id) {
 /* ---------------- 回收站 ---------------- */
 
 function trashList() {
-  return mutateTrash((trash) => {
-    const next = pruneTrash(trash);
+  return mutateTrash(async (trash) => {
+    const next = pruneTrash(trash, await trashTtlMs());
     return { write: next.length !== trash.length, list: next, result: { ok: true, items: next } };
   });
 }
@@ -259,23 +368,30 @@ function preserveSince(current, next, takenAt) {
   return late.length ? next.concat(late) : next;
 }
 
-/** 整体替换收藏（恢复备份「覆盖本地」用），入参已在前端做过结构校验 */
+/** 整体替换收藏（恢复备份「覆盖本地」用）：后台再洗一遍，不依赖前端自觉 */
 function replaceAll(payload) {
   const incoming = Array.isArray(payload && payload.items) ? payload.items : null;
   if (!incoming) return Promise.resolve({ ok: false, error: "invalid" });
+  const clean = dedupeById(incoming.map(cleanItem).filter(Boolean));
   return mutate((items) => {
-    const next = preserveSince(items, incoming, payload && payload.takenAt)
+    const next = preserveSince(items, clean, payload && payload.takenAt)
       .slice()
       .sort((a, b) => ((b && b.createdAt) || 0) - ((a && a.createdAt) || 0));
     return { write: true, items: next, result: { ok: true, count: next.length } };
   });
 }
 
+/** 同一份备份里也可能自带重复 id，留下先出现的那条 */
+function dedupeById(list) {
+  const seen = new Set();
+  return list.filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
+}
+
 /** 整体替换高亮 / 批注：和收藏一样走后台串行写，只覆盖快照内的内容 */
 function replaceHighlights(payload) {
   const incoming = Array.isArray(payload && payload.highlights) ? payload.highlights : null;
   if (!incoming) return Promise.resolve({ ok: false, error: "invalid" });
-  const clean = incoming.map(cleanHighlight).filter(Boolean);
+  const clean = dedupeById(incoming.map(cleanHighlight).filter(Boolean));
   return mutateHl((list) => {
     const next = preserveSince(list, clean, payload && payload.takenAt);
     return { write: true, list: next, result: { ok: true, count: next.length } };
@@ -289,9 +405,10 @@ function replaceHighlights(payload) {
 function mergeItems(payload) {
   const inItems = Array.isArray(payload && payload.items) ? payload.items : null;
   if (!inItems) return Promise.resolve({ ok: false, error: "invalid" });
+  const clean = dedupeById(inItems.map(cleanItem).filter(Boolean));
   return mutate((items) => {
     const have = new Set(items.map((x) => x && x.id));
-    const add = inItems.filter((x) => x && x.id && x.text && !have.has(x.id));
+    const add = clean.filter((x) => !have.has(x.id));
     add.forEach((x) => items.push(x));
     // 存储约定：新的在前，和列表视图一致
     items.sort((a, b) => ((b && b.createdAt) || 0) - ((a && a.createdAt) || 0));
@@ -348,7 +465,9 @@ if (API.contextMenus && API.contextMenus.onClicked) {
         const res = await addItem({ text, url: info.pageUrl || tab.url || "", title: tab.title || "" });
         notifyTab(tab.id, {
           type: "clipkeep:toast",
-          message: res.ok ? "已收藏 ✓" : res.error === "empty" ? "内容为空" : saveFailMessage(res),
+          message: res.ok
+            ? res.dup ? "这条已经在收藏里了" : "已收藏 ✓"
+            : res.error === "empty" ? "内容为空" : saveFailMessage(res),
         });
       } catch (err) {
         notifyTab(tab.id, { type: "clipkeep:toast", message: saveFailMessage(err) });
@@ -420,6 +539,9 @@ if (API.runtime && API.runtime.onMessage) {
             break;
           case "clipkeep:update":
             sendResponse(await updateItem(msg.id, msg.patch || {}));
+            break;
+          case "clipkeep:grade":
+            sendResponse(await gradeItem(msg.id, msg.review));
             break;
           case "clipkeep:clear":
             sendResponse(await clearAll());

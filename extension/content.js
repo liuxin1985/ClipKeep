@@ -254,6 +254,13 @@
     if (card) card.style.display = "none";
   }
 
+  /** 收藏结果的用户话术：重复入库要说「已经存过」，别报一个假的「已收藏」 */
+  function saveToast(res) {
+    if (res && res.dup) return "这条已经在收藏里了";
+    if (res && res.ok) return "已收藏 ✓";
+    return "保存失败";
+  }
+
   async function saveFromCard() {
     const c = ensureCard();
     const text = c.dataset.text || "";
@@ -264,7 +271,7 @@
       payload: { text, note, tags, url: location.href, title: document.title },
     });
     closeCard();
-    toast(res && res.ok ? "已收藏 ✓" : "保存失败");
+    toast(saveToast(res));
   }
 
   /* ---------- 高亮 / 批注 ---------- */
@@ -414,6 +421,12 @@
   document.addEventListener("click", async (e) => {
     const mark = e.target.closest && e.target.closest("." + NS + "-hl");
     if (!mark) return;
+    // 在高亮里拖着选一句话是「选中」，不是「点开」：这时候弹批注框会打断选取
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount) {
+      const r = sel.getRangeAt(0);
+      if (r.intersectsNode && r.intersectsNode(mark)) return;
+    }
     e.preventDefault();
     const id = mark.dataset.hlid;
     const list = await getHighlights();
@@ -486,6 +499,9 @@
       return;
     }
     const clone = main.cloneNode(true);
+    // 克隆里的高亮标记要拆掉：同一份 hlid 在页面上出现两次，重放和点击都会认错对象
+    clone.querySelectorAll("." + NS + "-hl").forEach(unwrapMark);
+    clone.normalize();
     STRIP_SELECTORS.forEach((sel) => {
       clone.querySelectorAll(sel).forEach((n) => n.remove());
     });
@@ -517,7 +533,7 @@
           type: "clipkeep:add",
           payload: { text: full, tags: "全文", url: location.href, title: document.title },
         });
-        toast(res && res.ok ? "已收藏全文 ✓" : "收藏失败");
+        toast(res && res.dup ? "全文已经收藏过了" : res && res.ok ? "已收藏全文 ✓" : "收藏失败");
       }
     });
   }
@@ -542,7 +558,7 @@
       type: "clipkeep:add",
       payload: { text, url: location.href, title: document.title },
     });
-    toast(res && res.ok ? "已收藏 ✓" : "保存失败");
+    toast(saveToast(res));
     return !!(res && res.ok);
   }
 

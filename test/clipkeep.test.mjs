@@ -848,6 +848,50 @@ async function testTrash() {
     eq("超时后回收站存储也清空", be.store.clipkeep_trash.length, 0);
   }
 
+  /* 3b. 保留时长可在设置里改（分钟），后台按配置清理 */
+  {
+    const seed = (prefs) => {
+      const be = makeBackend();
+      if (prefs) be.store.clipkeep_prefs = prefs;
+      be.store.clipkeep_trash = [
+        { tid: "t1", kind: "clip", item: { id: "o1", text: "两分钟前删的", createdAt: now }, deletedAt: Date.now() - 2 * 60 * 1000 },
+      ];
+      return be;
+    };
+    const keep30 = seed({ trash: { mins: 30 } });
+    eq("保留 30 分钟时 2 分钟前的删除仍可撤销", (await keep30.send({ type: "clipkeep:trash-list" })).items.length, 1);
+    const prune1 = seed({ trash: { mins: 1 } });
+    eq("保留 1 分钟时 2 分钟前的删除已清理", (await prune1.send({ type: "clipkeep:trash-list" })).items.length, 0);
+    eq("清理结果写回存储", prune1.store.clipkeep_trash.length, 0);
+    const dflt = seed(null);
+    eq("未配置时按默认 10 分钟保留", (await dflt.send({ type: "clipkeep:trash-list" })).items.length, 1);
+    const bogus = seed({ trash: { mins: 9999 } });
+    const kept = await bogus.send({ type: "clipkeep:trash-list" });
+    eq("非法时长回落到默认而不是永久保留", kept.items.length, 1);
+    const sixty = seed({ trash: { mins: 9999 } });
+    sixty.store.clipkeep_trash[0].deletedAt = Date.now() - 11 * 60 * 1000;
+    eq("非法时长不会把保留窗口放大", (await sixty.send({ type: "clipkeep:trash-list" })).items.length, 0);
+  }
+
+  /* 3c. 弹窗撤销条与设置面板跟着配置走 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("i1", "在册收藏"), mk("i2", "另一条")],
+      clipkeep_trash: [],
+      clipkeep_prefs: { trash: { mins: 30 } },
+    });
+    ok("设置面板有回收站时长选项", !!p.$("set-ttl"));
+    eq("设置面板显示当前保留时长", p.$("set-ttl") && p.$("set-ttl").value, "30");
+    await p.click(p.q('.item[data-id="i1"] [data-act="del"]'));
+    await tick(20);
+    ok("撤销条用配置里的分钟数", /30 分钟内可撤销/.test(p.$("trash-text").textContent), p.$("trash-text").textContent);
+    p.$("set-ttl").value = "1";
+    await p.fire(p.$("set-ttl"), "change");
+    await tick(20);
+    eq("改设置落到 prefs", p.store.clipkeep_prefs.trash.mins, 1);
+    ok("撤销条文案跟着变", /1 分钟内可撤销/.test(p.$("trash-text").textContent), p.$("trash-text").textContent);
+  }
+
   /* 4. 清空回收站后不可再撤销 */
   {
     const be = makeBackend();
@@ -1047,11 +1091,14 @@ function mountContent(pageUrl, highlights, htmlBody) {
   w.chrome = be.chrome;
   w.prompt = () => "";
   w.eval(src("content.js"));
+  const lastListener = () => be.listeners[be.listeners.length - 1]; // makeBackend 先注册后台，再注册本页 content script
   return {
-    store: be.store, chrome: be.chrome, w,
+    store: be.store, chrome: be.chrome, be, w,
     marks: () => [...w.document.querySelectorAll("mark.clipkeep-hl")],
     toastText: () => (w.document.getElementById("clipkeep-toast") || {}).textContent || "",
     bodyText: () => w.document.querySelector("article").textContent,
+    // 直接投递给本页 content script 的消息监听（净化阅读、快捷键秒存走这条路）
+    toContent: (msg) => new Promise((resolve) => lastListener()(msg, { tab: { id: 1 } }, resolve)),
   };
 }
 
@@ -1156,6 +1203,274 @@ async function testHighlightSync() {
   }
 }
 
+/* ---------------- 5. v1.4 审计：净化 / 假成功提示 / 重放竞态 ---------------- */
+
+async function testAudit() {
+  console.log("\n[5] v1.4 缺陷审计");
+  const now = Date.now();
+  const DAY = 86400000;
+
+  /* 1. 后台是最后一道关：合并进来的收藏必须净化（弹窗归一化只是善意路径，旧版本 / 手改文件会绕过） */
+  {
+    const be = makeBackend();
+    const long = "x".repeat(20001);
+    const res = await be.send({
+      type: "clipkeep:merge",
+      payload: {
+        items: [
+          { id: "m1", text: "带字符串标签", tags: "物理, 量子 物理" },
+          { id: "m1", text: "重复 id 的第二条" },
+          { id: "m2", text: "" },
+          { id: "m3" },
+          { id: "m4", text: "超长正文", note: long },
+          { id: "m5", text: "盒号越界", review: { box: 99, due: -1, seen: -3 } },
+          { id: "bad id<script>", text: "构造的 id" },
+        ],
+      },
+    });
+    const items = be.store.clipkeep_items;
+    const byId = (id) => items.find((x) => x.id === id);
+    eq("无正文的记录被拒收", items.filter((x) => ["m2", "m3"].includes(x.id)).length, 0);
+    eq("来料内部重复 id 只保留一条", items.filter((x) => x.id === "m1").length, 1);
+    ok("返回的新增数与入库一致", res.added === items.length, JSON.stringify(res));
+    eq("标签按分隔符切分去重", JSON.stringify(byId("m1").tags), JSON.stringify(["物理", "量子"]));
+    ok("合法 id 原样保留", !!byId("m1"));
+    ok("构造的 id 被重新生成", items.some((x) => x.text === "构造的 id" && /^[\w-]{1,64}$/.test(x.id) && x.id !== "bad id<script>"),
+      JSON.stringify(items.map((x) => x.id)));
+    ok("超长正文截断到上限", byId("m4").text.length <= 20000);
+    eq("盒号夹到合法区间", byId("m5").review.box, 5);
+    ok("非法排期视为立即到期", byId("m5").review.due >= 1 && byId("m5").review.due <= Date.now() + DAY);
+    eq("负数打卡次数归零", byId("m5").review.seen, 0);
+  }
+
+  /* 2. 覆盖本地同样净化，且清洗后的记录还能正常渲染（非数组 tags 会把弹窗整个列表打崩） */
+  {
+    const be = makeBackend();
+    const res = await be.send({
+      type: "clipkeep:replace",
+      payload: { items: [{ id: "r1", text: "正常" }, { id: "r2", text: 12345, tags: "甲" }, { tags: ["乙"] }] },
+    });
+    eq("覆盖后入库 2 条", be.store.clipkeep_items.length, 2);
+    eq("覆盖返回条数一致", res.count, 2);
+    ok("正文统一转成字符串", typeof be.store.clipkeep_items.find((x) => x.id === "r2").text === "string");
+    ok("标签统一是数组", be.store.clipkeep_items.every((x) => Array.isArray(x.tags)));
+    ok("createdAt 补齐", be.store.clipkeep_items.every((x) => Number.isFinite(x.createdAt)));
+  }
+
+  /* 3. 弹窗的操作提示不能说谎：后台没写成功就不能报「已删除」 */
+  {
+    const p = await mountPopup({ clipkeep_items: [{ id: "d1", text: "在册收藏", note: "", tags: [], url: "", title: "", createdAt: now }] });
+    p.store.__failNextSet = true;
+    await p.click(p.q('.item[data-id="d1"] [data-act="del"]'));
+    await tick(30);
+    ok("删除失败时提示失败而不是「已删除」", /失败|重试/.test(p.$("toast").textContent), p.$("toast").textContent);
+
+    const p2 = await mountPopup({ clipkeep_items: [{ id: "d2", text: "另一条", note: "", tags: [], url: "", title: "", createdAt: now }] });
+    p2.w.prompt = () => "新标签";
+    p2.store.__failNextSet = true;
+    await p2.click(p2.q('.item[data-id="d2"] [data-act="tag"]'));
+    await tick(30);
+    ok("加标签失败时提示失败", /失败|重试/.test(p2.$("toast").textContent), p2.$("toast").textContent);
+  }
+
+  /* 4. 同一 tick 里连续两次存储变更：重放不能把高亮弄丢或包成两层 */
+  {
+    const url = "http://localhost/replay-race";
+    const hl = (id, text) => ({ id, url, title: "页面", text, color: "yellow", note: "", createdAt: now });
+    const three = [hl("r1", "第一句"), hl("r2", "第二句"), hl("r3", "第三句")];
+    const c = mountContent(url, [], `<p>第一句，后面还有字。</p><p>第二句，后面还有字。</p><p>第三句，后面还有字。</p>`);
+    await Promise.all([
+      c.chrome.storage.local.set({ clipkeep_highlights: three }),
+      c.chrome.storage.local.set({ clipkeep_highlights: three }),
+    ]);
+    await tick(80);
+    eq("并发重放不丢高亮", c.marks().length, 3);
+    eq("并发重放不产生重复标记", new Set(c.marks().map((m) => m.dataset.hlid)).size, 3);
+    ok("三条高亮都在", ["r1", "r2", "r3"].every((id) => c.marks().some((m) => m.dataset.hlid === id)),
+      c.marks().map((m) => m.dataset.hlid).join(","));
+  }
+
+  /* 5. 在已有高亮里拖选文字：这是选取动作，不是点击，不该弹出批注框 */
+  {
+    const url = "http://localhost/drag-select";
+    const c = mountContent(url, [{ id: "ds1", url, title: "页面", text: "量子比特可以同时处于两种状态", color: "green", note: "重点", createdAt: now }],
+      `<p>简介：量子比特可以同时处于两种状态，这是并行性的来源。</p>`);
+    await tick(20);
+    eq("初始重放出标记", c.marks().length, 1);
+    let prompted = 0;
+    c.w.prompt = () => { prompted++; return null; };
+    // 在这条高亮内部拖选 3 个字，然后松手（浏览器随后会在同一处派发 click）
+    const tn = c.marks()[0].firstChild;
+    const range = c.w.document.createRange();
+    range.setStart(tn, 0);
+    range.setEnd(tn, 3);
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    c.marks()[0].dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("拖选结束不弹批注框", prompted, 0);
+    eq("拖选不会删掉高亮", c.store.clipkeep_highlights.length, 1);
+    // 真点击（没有选区）仍然要能编辑
+    sel.removeAllRanges();
+    c.w.prompt = () => "改过的批注";
+    c.marks()[0].dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("无选区时点击仍可改批注", c.store.clipkeep_highlights[0].note, "改过的批注");
+  }
+
+  /* 6. 净化阅读：克隆出来的正文不能带着同一批高亮标记，否则页面里出现重复 hlid */
+  {
+    const url = "http://localhost/reader-marks";
+    const c = mountContent(url, [{ id: "rm1", url, title: "页面", text: "量子比特", color: "green", note: "", createdAt: now }],
+      `<article><p>${"引言。".repeat(30)}量子比特可以同时处于两种状态，这是并行性的来源。</p></article>`);
+    await tick(20);
+    eq("进入前页面有 1 个标记", c.marks().length, 1);
+    const res = await c.toContent({ type: "clipkeep:reader" });
+    await tick(30);
+    ok("净化阅读已开启", !!c.w.document.querySelector(".clipkeep-reader"), JSON.stringify(res));
+    eq("阅读视图里没有重复的高亮标记", c.w.document.querySelectorAll(".clipkeep-reader mark.clipkeep-hl").length, 0);
+    eq("整页标记总数仍是 1", c.marks().length, 1);
+    ok("阅读正文文字完整", c.w.document.querySelector(".clipkeep-reader").textContent.includes("量子比特"));
+    await c.toContent({ type: "clipkeep:reader" });
+    await tick(30);
+    ok("退出后阅读视图移除", !c.w.document.querySelector(".clipkeep-reader"));
+    eq("退出后高亮标记还在", c.marks().length, 1);
+  }
+}
+
+/* ---------------- 6. 回顾热力图与打卡统计 ---------------- */
+
+const dkey = (ts) => {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+async function testActivity() {
+  console.log("\n[6] 回顾热力图");
+  const now = Date.now();
+  const DAY = 86400000;
+  const mk = (id, review) => ({
+    id, text: "要回顾的" + id, note: "", tags: [], url: "http://x/1", title: "页面",
+    createdAt: now, review,
+  });
+
+  /* 1. 后台：打分与活动记录一次写链完成 */
+  {
+    const be = makeBackend();
+    await be.send({ type: "clipkeep:add", payload: { text: "量子纠缠", url: "http://x/1" } });
+    const id = be.store.clipkeep_items[0].id;
+    const r = await be.send({ type: "clipkeep:grade", id, review: { box: 1, due: now + DAY, seen: 1 } });
+    ok("grade 返回成功", r.ok === true);
+    eq("排期已写入", be.store.clipkeep_items[0].review.box, 1);
+    eq("当日活动 +1", be.store.clipkeep_activity[dkey(now)], 1);
+    await be.send({ type: "clipkeep:grade", id, review: { box: 2, due: now + 3 * DAY, seen: 2 } });
+    eq("同日再打累计加", be.store.clipkeep_activity[dkey(now)], 2);
+    const nf = await be.send({ type: "clipkeep:grade", id: "nope", review: { box: 3, due: now, seen: 1 } });
+    ok("未知 id 返回 not_found", nf.ok === false && nf.error === "not_found");
+    eq("打分为未知 id 不记活动", be.store.clipkeep_activity[dkey(now)], 2);
+    eq("排期没被非法打分改掉", be.store.clipkeep_items[0].review.box, 2);
+    const bad = await be.send({ type: "clipkeep:grade", id, review: { box: "99", due: "abc", seen: -1 } });
+    ok("非法排期被拒绝", bad.ok === false, JSON.stringify(bad));
+    // 只留最近 120 天
+    be.store.clipkeep_activity = { "2000-01-01": 5, [dkey(now)]: 1 };
+    await be.send({ type: "clipkeep:grade", id, review: { box: 0, due: now, seen: 1 } });
+    ok("超龄活动记录被清理", be.store.clipkeep_activity["2000-01-01"] === undefined, JSON.stringify(be.store.clipkeep_activity));
+  }
+
+  /* 2. 弹窗回顾视图渲染热力图与统计 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("a1", { box: 0, due: now - 10, seen: 0 })],
+      clipkeep_activity: {
+        [dkey(now)]: 2,
+        [dkey(now - DAY)]: 5,
+        [dkey(now - 2 * DAY)]: 1,
+        [dkey(now - 30 * DAY)]: 2,
+      },
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    const cells = p.qa(".heat i");
+    eq("热力图 8 周 × 7 天", cells.length, 56);
+    const cellOf = (list, day) => list.find((c) => c.dataset.day === day);
+    const todayCell = cellOf(cells, dkey(now));
+    ok("每个格子都带日期", cells.every((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.dataset.day || "")),
+      cells.filter((c) => !/^\d{4}-\d{2}-\d{2}$/.test(c.dataset.day || "")).map((c) => c.outerHTML).join("|"));
+    ok("今天没有落在未来格子里", !!todayCell);
+    eq("2 次对应等级 1", Number(todayCell.dataset.lvl), 1);
+    eq("5 次对应等级 2", Number(cellOf(cells, dkey(now - DAY)).dataset.lvl), 2);
+    ok("超出 8 周窗口的天不画格子", !cellOf(cells, dkey(now - 200 * DAY)));
+    const stats = p.$("heat-stats").textContent;
+    ok("统计含最近 7 天回顾数", /本周\s*8/.test(stats), stats);
+    ok("统计含连续打卡天数", /连续\s*3\s*天/.test(stats), stats);
+    ok("累计统计窗口外的记录也算", /累计\s*10/.test(stats), stats);
+    // 打完分当天计数即时增加
+    await p.click(p.q('[data-act="reveal"]'));
+    await p.click(p.q('.rev-grade [data-g="1"]'));
+    await tick(30);
+    eq("打分写入活动记录", p.store.clipkeep_activity[dkey(now)], 3);
+    const cells2 = p.qa(".heat i");
+    eq("热力图今日等级随之升高", Number(cellOf(cells2, dkey(now)).dataset.lvl), 2);
+    ok("统计跟着刷新", /本周\s*9/.test(p.$("heat-stats").textContent), p.$("heat-stats").textContent);
+    eq("打分仍走排期更新", p.store.clipkeep_items.find((x) => x.id === "a1").review.box, 1);
+  }
+
+  /* 3. 没有活动数据时不报错 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("b1", { box: 0, due: now - 10, seen: 0 })] });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    eq("空数据仍画出完整格子", p.qa(".heat i").length, 56);
+    ok("统计显示 0", /本周\s*0/.test(p.$("heat-stats").textContent), p.$("heat-stats").textContent);
+  }
+}
+
+/* ---------------- 7. 重复收藏检测 ---------------- */
+
+async function testDedupe() {
+  console.log("\n[7] 重复收藏检测");
+  const text = "量子比特可以同时处于两种状态";
+
+  /* 1. 同一页面同一句话只入库一次 */
+  {
+    const be = makeBackend();
+    const first = await be.send({ type: "clipkeep:add", payload: { text, url: "http://x/1", title: "T" } });
+    ok("首次收藏成功", first.ok === true && !first.dup);
+    const again = await be.send({ type: "clipkeep:add", payload: { text: "  " + text + " ", url: "http://x/1", title: "T" } });
+    eq("重复收藏不再新增", be.store.clipkeep_items.length, 1);
+    ok("重复时告知 dup", again.ok === true && again.dup === true, JSON.stringify(again));
+    eq("回报的是已存在的那条", again.item.text, text);
+    const other = await be.send({ type: "clipkeep:add", payload: { text, url: "http://y/2", title: "T2" } });
+    eq("不同页面同文字允许收藏", be.store.clipkeep_items.length, 2);
+    ok("不同页面不算重复", !other.dup);
+    const noted = await be.send({ type: "clipkeep:add", payload: { text, url: "http://x/1", note: "这次有备注" } });
+    eq("带备注的收藏不算重复（备注是新增信息）", be.store.clipkeep_items.length, 3);
+    ok("带备注时正常入库", noted.ok === true && !noted.dup);
+    const tagged = await be.send({ type: "clipkeep:add", payload: { text, url: "http://x/1", tags: "物理" } });
+    eq("带标签的收藏不算重复", be.store.clipkeep_items.length, 4);
+    ok("带标签时正常入库", tagged.ok === true && tagged.item.tags.join(",") === "物理");
+    const sameAgain = await be.send({ type: "clipkeep:add", payload: { text, url: "http://x/1", tags: "物理" } });
+    eq("内容来源备注标签全同才算重复", be.store.clipkeep_items.length, 4);
+    ok("全同再存返回 dup", sameAgain.ok === true && sameAgain.dup === true);
+  }
+
+  /* 2. 快捷键秒存重复时给出明确提示，而不是「已收藏」 */
+  {
+    const url = "http://localhost/dedupe-toast";
+    const c = mountContent(url, [], `<p>已经存过的句子，后面还有字。</p>`);
+    const seeded = await c.be.send({ type: "clipkeep:add", payload: { text: "已经存过的句子", url } });
+    ok("测试内预置一条收藏", seeded.ok === true);
+    const realGetSel = c.w.getSelection.bind(c.w);
+    c.w.getSelection = () => ({ toString: () => "已经存过的句子", rangeCount: 1, getRangeAt: () => realGetSel().getRangeAt(0) });
+    await c.toContent({ type: "clipkeep:save-selection" });
+    await tick(40);
+    eq("重复秒存不新增数据", c.store.clipkeep_items.length, 1);
+    ok("页面提示已经在收藏里", /已经在收藏/.test(c.toastText()), c.toastText());
+  }
+}
+
 /* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
@@ -1229,7 +1544,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testManifests];
   for (const s of suites) {
     try {
       await s();
