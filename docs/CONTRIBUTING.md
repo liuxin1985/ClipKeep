@@ -24,7 +24,8 @@
 ```bash
 npm install     # 只装 jsdom（devDependency）
 npm run check   # node --check 语法校验
-npm test        # 132 项断言：消息路由 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 / 高亮重放与删除
+npm test        # 332 项断言：消息路由 / 并发写 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 /
+                # 高亮重放与同步 / 回收站撤销 / Chrome-Safari 清单一致性
 ```
 
 新增功能请顺带在 `test/clipkeep.test.mjs` 补几条断言；不确定怎么加可以在 Issue 里说，我们帮你写。
@@ -39,15 +40,24 @@ npm test        # 132 项断言：消息路由 / 快捷键链路 / 标签管理 
 
 - 原生 JS，每个文件一个 IIFE，全局只挂 `window.__clipkeep*` 守卫，不用打包器。
 - 跨浏览器统一用 `const API = browser || chrome`。
-- 存储键集中在 `clipkeep_items` / `clipkeep_highlights` / `clipkeep_prefs`，新键请同步更新备份逻辑。
+- 存储键集中在 `clipkeep_items` / `clipkeep_highlights` / `clipkeep_trash` / `clipkeep_prefs`，
+  新增键请同步更新备份逻辑，并保证「备份」不把临时数据（如回收站）导出。
+- **写存储只走 background**：内容脚本和弹窗都不要再「读整表 → 改 → 写整表」，
+  而是发 `clipkeep:*` 消息，由后台那条串行写链（`chainStep`）现读现写；
+  链内的步骤可以直接读写其它键，但绝不能再调用 `mutate*`，否则会自锁。
+- 外部来源的数据（备份文件、其它标签页）入库前一律过白名单：id 用 `/^[\w-]{1,64}$/`，
+  颜色取枚举值，数字字段夹取范围，拼进 HTML 前再 `esc()` 一次。
 - 新增文案优先中文，兼顾英文注释。
 - 不引入需要联网的 CDN（受 MV3 CSP 限制）。
+- 发版清单：`[4]` 测试会检查两份 manifest 对齐、清单引用的文件都在、
+  前端消息后台都有处理、CHANGELOG / README / 落地页指向当前版本号，别漏掉任何一项。
 
 ## 好上手的第一批 Issue
 
 - 高亮颜色选择器（目前固定四色，🏷 面板与设置面板可作参考实现）。
+- 回收站保留时长可调（目前硬编码 10 分钟，`TRASH_TTL`）。
 - 导出模板自定义（标题格式、是否带来源、front-matter）。
-- 回顾统计热力图（每天复习了几张卡，数据已在 `clipkeep_review` 里）。
+- 回顾统计热力图（每天复习了几张卡，数据已在 `clipkeep_items[].review` 里）。
 - 更多站点的净化阅读提取规则。
 - 真实录屏替换 `docs/demo.gif` 的示意动图（生成脚本 `docs/gen_demo_gif.py`）。
 

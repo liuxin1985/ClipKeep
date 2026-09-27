@@ -405,8 +405,8 @@
     trashbarEl.hidden = trash.length === 0;
     if (!trash.length) return;
     const kinds = new Set(trash.map((t) => (t && t.kind === "hl" ? "高亮" : "收藏")));
-    trashTextEl.textContent =
-      `已删除 ${trash.length} 项${kinds.size > 1 ? "（收藏 + 高亮）" : "（" + [...kinds][0] + "）"} · 10 分钟内可撤销`;
+    const what = kinds.size === 1 ? [...kinds][0] : "";
+    trashTextEl.textContent = `已删除 ${trash.length} 条${what} · 10 分钟内可撤销`;
   }
 
   $("btn-undo").addEventListener("click", async () => {

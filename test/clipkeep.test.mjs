@@ -1156,10 +1156,80 @@ async function testHighlightSync() {
   }
 }
 
+/* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
+
+const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
+
+async function testManifests() {
+  console.log("\n[4] 清单一致性：Chrome / Safari / 消息协议 / 版本与文档");
+  const ROOT = path.resolve(EXT, "..");
+  const rj = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+  const mf = rj(path.join(EXT, "manifest.json"));
+  const sf = rj(path.join(EXT, "manifest.safari.json"));
+  const pkg = rj(path.join(ROOT, "package.json"));
+
+  /* 两份清单必须描述同一个产品 */
+  eq("版本号一致（Chrome / Safari）", mf.version, sf.version);
+  eq("清单版本与 package.json 一致", mf.version, pkg.version);
+  eq("扩展名称一致", mf.name, sf.name);
+  eq("功能描述一致", mf.description, sf.description);
+  eq("权限集合一致", mf.permissions.slice().sort().join(","), sf.permissions.slice().sort().join(","));
+  eq("快捷键声明一致", JSON.stringify(mf.commands), JSON.stringify(sf.commands));
+  eq("图标声明一致", JSON.stringify(mf.icons), JSON.stringify(sf.icons));
+  eq("弹窗入口一致", mf.action.default_popup, sf.action.default_popup);
+  eq("内容脚本 js 一致", mf.content_scripts[0].js.join(","), sf.content_scripts[0].js.join(","));
+  eq("内容脚本 css 一致", mf.content_scripts[0].css.join(","), sf.content_scripts[0].css.join(","));
+  ok("Safari 声明 strict_min_version 16.4",
+     ((sf.browser_specific_settings || {}).safari || {}).strict_min_version === "16.4");
+  ok("Chrome 用 <all_urls>，Safari 退回 http/https 通配",
+     mf.content_scripts[0].matches.includes("<all_urls>") && sf.content_scripts[0].matches.length > 1);
+  ok("Safari 保留可选主机权限用于动态注入",
+     Array.isArray(sf.optional_host_permissions) && sf.optional_host_permissions.length > 0);
+
+  /* 清单引用的文件都要在，目录里也不许留没被引用的死文件 */
+  const referenced = new Set([
+    "manifest.json", "manifest.safari.json",
+    mf.background.service_worker, sf.background.service_worker,
+    mf.action.default_popup,
+    ...Object.values(mf.icons), ...Object.values(sf.icons),
+    ...mf.content_scripts[0].js, ...mf.content_scripts[0].css,
+    ...sf.content_scripts[0].js, ...sf.content_scripts[0].css,
+  ]);
+  const html = src("popup.html");
+  for (const m of html.matchAll(/(?:href|src)="([^"#:]+)"/g)) referenced.add(m[1]);
+  const onDisk = fs.readdirSync(EXT).filter((f) => /\.(js|css|html|png|json)$/.test(f));
+  for (const f of onDisk) {
+    ok(`目录文件 ${f} 有被清单或弹窗引用`, referenced.has(f), "→ 多余文件会被一起装进浏览器");
+  }
+  for (const f of referenced) {
+    if (f === "manifest.json" || f === "manifest.safari.json") continue;
+    ok(`清单引用 ${f} 存在`, fs.existsSync(path.join(EXT, f)));
+  }
+
+  /* 前端发出的每种消息，后台都得有对应处理 */
+  const bg = src("background.js");
+  const front = src("popup.js") + src("content.js");
+  const frontTypes = new Set(typesIn(front));
+  const bgTypes = new Set(typesIn(bg));
+  for (const t of frontTypes) ok(`后台认识 ${t}`, bgTypes.has(t), "→ 消息会返回 unknown");
+  for (const t of bgTypes) ok(`前端或页面用到 ${t}`, frontTypes.has(t), "→ 死代码 / 拼错的历史消息");
+
+  /* 发布文档要指向当前版本 */
+  const changelog = fs.readFileSync(path.join(ROOT, "CHANGELOG.md"), "utf8");
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  const landing = fs.readFileSync(path.join(ROOT, "docs", "index.html"), "utf8");
+  ok(`CHANGELOG 有 [${mf.version}] 条目`, new RegExp(`^## \\[${mf.version}\\]`, "m").test(changelog));
+  ok(`README 徽章指向 ${mf.version}`, readme.includes(`version-${mf.version}`));
+  ok(`落地页写明当前版本 v${mf.version}`, landing.includes(`v${mf.version}`));
+  const [maj, min] = mf.version.split(".");
+  ok(`README 里程碑把 v${maj}.${min} 标为当前版本`,
+     new RegExp(`v${maj}\\.${min}[^\\n]*当前`).test(readme));
+}
+
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testManifests];
   for (const s of suites) {
     try {
       await s();

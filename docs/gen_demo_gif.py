@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # 生成 ClipKeep README 演示动图（界面示意 mockup）
-# v1.2：高亮/批注 + 回顾 + 搜索命中高亮 + 标签管理 + 设置 + 恢复差异 + 快捷键秒存
+# v1.3：高亮/批注 + 高亮总览 + 删除撤销 + 回顾 + 搜索命中高亮 + 标签管理 + 设置 + 恢复差异 + 快捷键秒存
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 960, 600
@@ -114,20 +114,32 @@ def popup_shell(d):
     return x, y, w, h
 
 def popup_tabs(d, x, y, w, active):
+    """三个标签页：收藏 / 高亮 / 回顾（active 为选中下标）"""
     hy = y + 52
-    x2, y2, h2 = x, y, 460
+    tw = w / 3
     d.rectangle([x, hy, x+w, hy+38], fill=CARD)
     d.line([x, hy+38, x+w, hy+38], fill=LINE, width=1)
-    for i, label in enumerate(["收藏", "回顾"]):
-        cx = x + 16 + i*164
-        on = (i == active)
-        d.text([cx+46, hy+9], label, font=f(14, on), fill=BLUE if on else MUTED)
-        if on:
-            d.rectangle([cx, hy+35, cx+150, hy+38], fill=BLUE)
-    if active == 0:
-        rrect(d, [x+266, hy+10, x+290, hy+28], 9, fill=RED)
-        d.text([x+273, hy+12], "2", font=f(12), fill=(255,255,255))
+    for i, label in enumerate(["收藏", "高亮", "回顾"]):
+        fnt = f(14, i == active)
+        lw = d.textlength(label, font=fnt)
+        cx = x + i*tw + (tw-lw)/2
+        d.text([cx, hy+9], label, font=fnt, fill=BLUE if i == active else MUTED)
+        if i == active:
+            d.rectangle([x + i*tw + tw/2 - 40, hy+35, x + i*tw + tw/2 + 40, hy+38], fill=BLUE)
+    if active == 0:  # 回顾红点徽标提示有待复习内容
+        d.text([x + 2*tw + tw/2 + 16, hy+11], "", font=f(12), fill=MUTED)
+        rrect(d, [x + 2*tw + tw/2 + 14, hy+10, x + 2*tw + tw/2 + 34, hy+28], 9, fill=RED)
+        d.text([x + 2*tw + tw/2 + 21, hy+12], "2", font=f(12), fill=(255,255,255))
     d.rounded_rectangle([x, y, x+w, y+460], radius=14, outline=(203, 213, 225), width=2)
+
+def trashbar(d, x, y, w, text="已删除 1 条收藏 · 10 分钟内可撤销"):
+    """删除后出现在工具条下方的撤销条"""
+    rrect(d, [x+14, y+172, x+w-14, y+206], 10, fill=SOFT, outline=LINE, width=1)
+    d.text([x+26, y+182], text, font=f(11), fill=MUTED)
+    rrect(d, [x+w-116, y+178, x+w-64, y+200], 7, fill=BLUE)
+    d.text([x+w-106, y+181], "撤销", font=f(12), fill=(255,255,255))
+    rrect(d, [x+w-58, y+178, x+w-22, y+200], 7, outline=LINE, width=1)
+    d.text([x+w-48, y+181], "清空", font=f(12), fill=(55,65,81))
 
 def popup_footer(d, x, y, w, h, toast=None):
     fy = y + h - 40
@@ -141,7 +153,7 @@ def popup_footer(d, x, y, w, h, toast=None):
         rrect(d, [x+w/2-105, fy-42, x+w/2+105, fy-12], 15, fill=(17,24,39))
         d.text([x+w/2-88, fy-36], toast, font=f(14), fill=(255,255,255))
 
-def popup_clips(d, hits=False, tagbox=False):
+def popup_clips(d, hits=False, tagbox=False, undo=False, toast=None):
     x, y, w, h = popup_shell(d)
     popup_tabs(d, x, y, w, 0)
     rrect(d, [x+16, y+100, x+w-16, y+130], 8, fill=CARD, outline=LINE, width=1)
@@ -160,7 +172,9 @@ def popup_clips(d, hits=False, tagbox=False):
     rrect(d, [x+w-46, y+142, x+w-16, y+164], 11, fill=HL_PINK if tagbox else CARD,
          outline=None if tagbox else LINE, width=0 if tagbox else 1)
     d.text([x+w-40, y+145], "标签", font=f(12), fill=INK)
-    cy = y + 178
+    if undo:
+        trashbar(d, x, y, w)
+    cy = y + (214 if undo else 178)
     if tagbox:
         d.text([x+16, cy+2], "标签管理", font=f(12, True), fill=INK)
         rows = [("量子计算", 3), ("重点", 2), ("旧名", 1)]
@@ -194,7 +208,38 @@ def popup_clips(d, hits=False, tagbox=False):
     rrect(d, [x+16, cy2, x+w-16, cy2+60], 12, fill=CARD, outline=LINE, width=1)
     d.rounded_rectangle([x+28, cy2+14, x+w-40, cy2+28], radius=7, fill=(236,238,241))
     d.rounded_rectangle([x+28, cy2+36, x+w-120, cy2+50], radius=7, fill=(236,238,241))
-    popup_footer(d, x, y, w, h)
+    popup_footer(d, x, y, w, h, toast=toast)
+
+def popup_marks(d, toast=None):
+    """v1.3：高亮 / 批注总览，按页面分组"""
+    x, y, w, h = popup_shell(d)
+    popup_tabs(d, x, y, w, 1)
+    rrect(d, [x+16, y+100, x+w-96, y+130], 8, fill=CARD, outline=LINE, width=1)
+    d.text([x+28, y+106], "搜索高亮与批注…", font=f(13), fill=(156,163,175))
+    rrect(d, [x+w-84, y+100, x+w-16, y+130], 8, fill=SOFT, outline=LINE, width=1)
+    d.text([x+w-72, y+106], "导出批注", font=f(12), fill=BLUE)
+    d.text([x+16, y+144], "example.com", font=f(12, True), fill=BLUE)
+    d.line([x+16, y+162, x+96, y+162], fill=BLUE, width=1)
+    rrect(d, [x+w-52, y+142, x+w-16, y+164], 11, fill=SOFT)
+    d.text([x+w-42, y+146], "2 条", font=f(11), fill=BLUE)
+    rows = [
+        (HL_GREEN, "量子比特可以同时处于 0 和 1 的叠加态", "和 Leitner 盒对照着记", y + 176),
+        (HL_YELLOW, "退相干时间是量子计算的主要工程难点", "", y + 268),
+    ]
+    for col, text, note, ry in rows:
+        rrect(d, [x+16, ry, x+w-16, ry+80], 12, fill=CARD, outline=LINE, width=1)
+        d.rectangle([x+16, ry, x+21, ry+80], fill=col)
+        d.text([x+32, ry+12], text, font=f(12), fill=INK)
+        if note:
+            d.rectangle([x+32, ry+36, x+34, ry+54], fill=LINE)
+            d.text([x+42, ry+38], "批注：" + note, font=f(11), fill=MUTED)
+        else:
+            d.text([x+32, ry+38], "09-27 09:12", font=f(11), fill=MUTED)
+        for i, b in enumerate(["复制", "删除"]):
+            bx = x+w-16-2*46 + i*46
+            rrect(d, [bx, ry+56, bx+40, ry+74], 6, outline=RED if b == "删除" else LINE, width=1)
+            d.text([bx+8, ry+58], b, font=f(11), fill=RED if b == "删除" else (55,65,81))
+    popup_footer(d, x, y, w, h, toast=toast)
 
 def popup_settings(d):
     x, y, w, h = popup_shell(d)
@@ -257,7 +302,7 @@ def page_toast(d, text, key=False):
 
 def popup_review(d, revealed=False):
     x, y, w, h = popup_shell(d)
-    popup_tabs(d, x, y, w, 1)
+    popup_tabs(d, x, y, w, 2)
     d.text([x+16, y+102], "待回顾 2 条 · 记忆盒 1/5", font=f(12), fill=MUTED)
     cy = y + 128
     ch = 300 if revealed else 210
@@ -313,7 +358,16 @@ im, d, _ = base(); restore_modal(d); frames.append(im.copy())
 # 场景8：v1.2 —— Alt+Shift+K 秒存选区
 im, d, _ = base(); selection(d); page_toast(d, "已存入 ClipKeep", key=True); frames.append(im.copy())
 
-durations = [700, 800, 1200, 1200, 900, 1000, 1000, 1100, 1000, 1800, 1200, 1300, 1200, 1400, 1600]
+# 场景9：v1.3 —— 高亮 / 批注总览，整份导出 Markdown
+im, d, _ = base(); popup_marks(d); frames.append(im.copy())
+im, d, _ = base(); popup_marks(d, toast="已导出 2 条高亮"); frames.append(im.copy())
+
+# 场景10：v1.3 —— 删错了能撤销（10 分钟回收站）
+im, d, _ = base(); popup_clips(d, undo=True); frames.append(im.copy())
+im, d, _ = base(); popup_clips(d, toast="已撤销删除 ✓"); frames.append(im.copy())
+
+durations = [700, 800, 1200, 1200, 900, 1000, 1000, 1100, 1000, 1800, 1200, 1300, 1200, 1400, 1600,
+             1600, 1200, 1500, 1200]
 assert len(durations) == len(frames), f"durations({len(durations)}) != frames({len(frames)})"
 frames[0].save(
     "/Users/liuxin/Documents/开源项目/ClipKeep/docs/demo.gif",
