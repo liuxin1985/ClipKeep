@@ -62,6 +62,23 @@
           <option value="60">60 分钟</option>
         </select>
       </label>
+      <label class="set-row">
+        <span>导出标题样式</span>
+        <select id="set-heading" title="Markdown 导出里每条收藏的小标题怎么写">
+          <option value="numbered">编号 + 来源标题</option>
+          <option value="title">仅来源标题</option>
+          <option value="text">正文首句</option>
+          <option value="date">收藏时间</option>
+        </select>
+      </label>
+      <label class="set-row">
+        <span>导出带来源链接</span>
+        <input id="set-source" type="checkbox" />
+      </label>
+      <label class="set-row">
+        <span>Obsidian front-matter</span>
+        <input id="set-fm" type="checkbox" />
+      </label>
       <p class="set-hint">快捷键 <kbd>Alt+Shift+K</kbd> 秒存当前选区；设置只存在本地。</p>
     </section>
 

@@ -1471,6 +1471,213 @@ async function testDedupe() {
   }
 }
 
+/* ---------------- 8. v1.5 缺陷审计：来源链接协议 / 截断标记 / 打卡连续性 ---------------- */
+
+async function testV15Audit() {
+  console.log("\n[8] v1.5 缺陷审计");
+  const now = Date.now();
+  const DAY = 86400000;
+  const clip = (id, extra) => ({
+    id, text: "收藏" + id, note: "", tags: [], url: "", title: "", createdAt: now, ...(extra || {}),
+  });
+
+  /* 1. 收藏列表的来源链接同样要过协议白名单（高亮视图 v1.3 已防，列表漏了） */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        clip("j1", { url: "javascript:alert(1)", title: "点我" }),
+        clip("h1", { url: "https://example.com/a", title: "正常文章" }),
+      ],
+    });
+    const row = p.q('.item[data-id="j1"]');
+    eq("javascript: 来源不渲染成链接", row.querySelectorAll("a").length, 0);
+    ok("危险 URL 不出现在 href 里", !/href="javascript/i.test(row.innerHTML), row.innerHTML);
+    ok("来源标题仍以纯文本留着，不丢信息", /点我/.test(row.textContent), row.textContent);
+    ok("正常 https 来源照旧可点",
+      p.q('.item[data-id="h1"]').querySelectorAll('a[href^="https://"]').length === 1);
+  }
+
+  /* 2. 导出的来源链接要容得下括号（维基一类 URL 太常见） */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        clip("w1", { text: "量子隧穿", url: "https://en.wikipedia.org/wiki/Foo_(bar)", title: "Foo" }),
+        clip("w2", { text: "危险来源", url: "javascript:alert(1)", title: "bad" }),
+      ],
+    });
+    await p.click(p.$("btn-export"));
+    await tick(30);
+    const md = p.getDownloaded() || "";
+    const at = md.indexOf("[来源]");
+    ok("来源链接用尖括号包住带括号的 URL", /\[来源\]\(<https:[^>]*\(bar\)[^>]*>\)/.test(md),
+      at < 0 ? "导出里没有来源行" : md.slice(at, at + 70));
+    ok("非法协议的来源不写成链接", !/\]\(<?javascript:/i.test(md), md.slice(0, 400));
+  }
+
+  /* 3. 超长收藏被截断，得让用户看得见 */
+  {
+    const be = makeBackend();
+    const r = await be.send({ type: "clipkeep:add", payload: { text: "长".repeat(20001), url: "http://x/1" } });
+    ok("超长收藏成功入库", r.ok === true);
+    eq("正文截断到上限", r.item.text.length, 20000);
+    ok("后台标记 truncated", r.item.truncated === true);
+    const p = await mountPopup({ clipkeep_items: be.store.clipkeep_items });
+    ok("列表显示「已截断」标记", /已截断/.test(p.q(".item").innerHTML), p.q(".item").innerHTML.slice(0, 160));
+    const p2 = await mountPopup({ clipkeep_items: [clip("n1", { url: "http://x/2" })] });
+    ok("正常收藏不显示截断标记", !/已截断/.test(p2.q(".item").innerHTML));
+  }
+
+  /* 4. 今天还没打卡，不该把昨天的连续纪录清零 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [clip("r1", { review: { box: 0, due: now - 10, seen: 0 } })],
+      clipkeep_activity: { [dkey(now - DAY)]: 4, [dkey(now - 2 * DAY)]: 3 },
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    const stats = p.$("heat-stats").textContent;
+    ok("今天未打卡仍连续 2 天", /连续\s*2\s*天/.test(stats), stats);
+    ok("本周只数实际打卡的 7 条", /本周\s*7/.test(stats), stats);
+  }
+
+  /* 5. 本周窗口的边界：含今天往前第 6 天，不含第 7 天 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [clip("r2", { review: { box: 0, due: now - 10, seen: 0 } })],
+      clipkeep_activity: { [dkey(now - 6 * DAY)]: 2, [dkey(now - 7 * DAY)]: 5 },
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    const stats = p.$("heat-stats").textContent;
+    ok("边界外那天不计入本周", /本周\s*2/.test(stats), stats);
+    ok("边界外那天仍计入累计", /累计\s*7/.test(stats), stats);
+  }
+
+  /* 6. 超长收藏不能把列表撑爆：默认折叠，可展开 / 收起 */
+  {
+    const long = ("量子比特可以叠加。".repeat(60)); // ~540 字
+    const p = await mountPopup({
+      clipkeep_items: [clip("L1", { text: long }), clip("S1", { text: "很短的一条收藏" })],
+    });
+    const row = p.q('.item[data-id="L1"]');
+    ok("长正文默认折叠", row.querySelector(".item-text").classList.contains("is-clamped"),
+      row.querySelector(".item-text").className);
+    const more = row.querySelector('[data-act="more"]');
+    ok("长正文给出展开按钮", !!more, row.innerHTML.slice(-200));
+    await p.click(more);
+    ok("点一下展开全文", p.q('.item[data-id="L1"] .item-text').classList.contains("is-open") === false &&
+      p.q('.item[data-id="L1"] .item-text').classList.contains("is-clamped") === false);
+    ok("展开后按钮变成收起", /收起/.test(p.q('.item[data-id="L1"] [data-act="more"]').textContent),
+      p.q('.item[data-id="L1"] [data-act="more"]').textContent);
+    await p.click(p.q('.item[data-id="L1"] [data-act="more"]'));
+    ok("再点收回", p.q('.item[data-id="L1"] .item-text').classList.contains("is-clamped"));
+    ok("短正文不加折叠与按钮",
+      !p.q('.item[data-id="S1"] .item-text').classList.contains("is-clamped") &&
+      !p.q('.item[data-id="S1"] [data-act="more"]'));
+  }
+}
+
+/* ---------------- 9. 导出模板自定义 ---------------- */
+
+async function testExportTemplate() {
+  console.log("\n[9] 导出模板自定义");
+  const now = Date.now();
+  const it1 = {
+    id: "e1", text: "量子比特可以同时处于两种状态，这是它超越经典计算的根本原因。",
+    note: "备注一", tags: ["量子", "重点"], url: "https://example.com/qm",
+    title: "量子计算入门", createdAt: now,
+  };
+  const it2 = { id: "e2", text: "退相干时间是主要工程难点", note: "", tags: [], url: "", title: "", createdAt: now - 1000 };
+
+  /* 1. 默认模板保持 v1.4 的形状 */
+  {
+    const p = await mountPopup({ clipkeep_items: [it1, it2] });
+    ok("设置面板有导出模板控件", !!p.$("set-heading") && !!p.$("set-source") && !!p.$("set-fm"));
+    eq("默认标题样式回填下拉框", p.$("set-heading").value, "numbered");
+    eq("默认带来源链接", p.$("set-source").checked, true);
+    eq("默认不带 front-matter", p.$("set-fm").checked, false);
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    const md = p.getDownloaded() || "";
+    ok("默认标题带编号与来源标题", /^## 1\. 量子计算入门$/m.test(md), md.slice(0, 160));
+    ok("默认输出来源链接", /\[来源\]\(<https:\/\/example\.com\/qm>\)/.test(md), md.slice(0, 300));
+    ok("默认没有 front-matter", !md.startsWith("---"));
+  }
+
+  /* 2. 标题样式：来源标题 / 正文首句 / 收藏时间 */
+  {
+    const p = await mountPopup({ clipkeep_items: [it1, it2] });
+    p.$("set-heading").value = "title";
+    await p.fire(p.$("set-heading"), "change");
+    await tick(20);
+    eq("标题样式写进 prefs", p.store.clipkeep_prefs.export.heading, "title");
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    ok("纯标题样式不带编号", /^## 量子计算入门$/m.test(p.getDownloaded() || ""));
+    ok("无标题无来源时记作未命名", /^## 未命名$/m.test(p.getDownloaded() || ""),
+      (p.getDownloaded() || "").split("\n").filter((l) => l.startsWith("## ")).join("|"));
+  }
+  {
+    const p = await mountPopup({ clipkeep_items: [it1, it2] });
+    p.$("set-heading").value = "text";
+    await p.fire(p.$("set-heading"), "change");
+    await tick(20);
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    const md = p.getDownloaded() || "";
+    ok("正文首句作标题", /^## 量子比特可以同时处于两种状态，这是它超越/m.test(md),
+      md.split("\n").filter((l) => l.startsWith("## ")).join("|"));
+    ok("短正文不硬加省略号", /^## 退相干时间是主要工程难点$/m.test(md),
+      md.split("\n").filter((l) => l.startsWith("## ")).join("|"));
+  }
+  {
+    const p = await mountPopup({ clipkeep_items: [it1] });
+    p.$("set-heading").value = "date";
+    await p.fire(p.$("set-heading"), "change");
+    await tick(20);
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    ok("收藏时间作标题", /^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/m.test(p.getDownloaded() || ""),
+      (p.getDownloaded() || "").split("\n").filter((l) => l.startsWith("## ")).join("|"));
+  }
+
+  /* 3. 来源开关与 Obsidian front-matter */
+  {
+    const p = await mountPopup({ clipkeep_items: [it1, it2] });
+    p.$("set-source").checked = false;
+    await p.fire(p.$("set-source"), "change");
+    p.$("set-fm").checked = true;
+    await p.fire(p.$("set-fm"), "change");
+    await tick(20);
+    eq("来源开关入库", p.store.clipkeep_prefs.export.source, false);
+    eq("front-matter 开关入库", p.store.clipkeep_prefs.export.frontMatter, true);
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    const md = p.getDownloaded() || "";
+    ok("关掉后不输出来源", !/\[来源\]|来源：/.test(md));
+    ok("front-matter 从文件第一行开始", md.startsWith("---\n"), md.slice(0, 60));
+    ok("front-matter 带标题与条数", /title: ClipKeep 收藏/.test(md) && /count: 2/.test(md), md.slice(0, 200));
+    ok("front-matter 有闭合线且正文在其后", md.indexOf("\n---\n", 4) > 0 &&
+      md.indexOf("## 1.") > md.indexOf("\n---\n", 4), md.slice(0, 200));
+  }
+
+  /* 4. 非法值回落默认，且改导出不冲掉别的设置段 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [it1],
+      clipkeep_prefs: { review: { cap: 5, mult: 2 }, trash: { mins: 30 }, dark: true, export: { heading: "<script>" } },
+    });
+    eq("非法标题样式回落默认", p.$("set-heading").value, "numbered");
+    p.$("set-heading").value = "date";
+    await p.fire(p.$("set-heading"), "change");
+    await tick(20);
+    eq("回顾设置没被冲掉", p.store.clipkeep_prefs.review.cap, 5);
+    eq("回收站设置没被冲掉", p.store.clipkeep_prefs.trash.mins, 30);
+    eq("深色偏好没被冲掉", p.store.clipkeep_prefs.dark, true);
+    ok("标题样式里的脚本不会被拼进 HTML", !/<script>/.test(p.$("settings").innerHTML), p.$("settings").innerHTML.slice(0, 200));
+  }
+}
+
 /* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
@@ -1544,7 +1751,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testManifests];
   for (const s of suites) {
     try {
       await s();

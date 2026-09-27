@@ -241,9 +241,45 @@ def popup_marks(d, toast=None):
             d.text([bx+8, ry+58], b, font=f(11), fill=RED if b == "删除" else (55,65,81))
     popup_footer(d, x, y, w, h, toast=toast)
 
-def popup_settings(d):
+def caret(d, cx, cy, col=(107, 114, 128)):
+    """下拉框的小箭头：字体里没有 ▾，直接画三角形，别留豆腐块。"""
+    d.polygon([(cx, cy), (cx + 9, cy), (cx + 4.5, cy + 6)], fill=col)
+
+def popup_export_settings(d, x, y, w):
+    """导出模板那组设置：小标题写法 + 来源链接开关 + Obsidian front-matter。"""
+    d.text([x+16, y+102], "设置 · 导出", font=f(12, True), fill=INK)
+    rrect(d, [x+16, y+126, x+w-16, y+322], 12, fill=CARD, outline=LINE, width=1)
+    d.text([x+30, y+142], "导出标题样式", font=f(13), fill=INK)
+    rrect(d, [x+w-160, y+138, x+w-32, y+164], 7, fill=(249,250,251), outline=LINE, width=1)
+    d.text([x+w-150, y+143], "编号 + 来源标题", font=f(11), fill=INK)
+    caret(d, x+w-56, y+148)
+    d.text([x+30, y+170], "Markdown 里每条收藏的小标题怎么写", font=f(11), fill=MUTED)
+    d.line([x+30, y+196, x+w-30, y+196], fill=LINE, width=1)
+    row = [("导出带来源链接", True, "关掉就不写 [来源](…)"),
+           ("Obsidian front-matter", False, "文件顶部加 title / exported / count")]
+    for i, (label, on, hint) in enumerate(row):
+        ry = y + 208 + i * 58
+        d.text([x+30, ry], label, font=f(13), fill=INK)
+        cx = x + w - 48
+        rrect(d, [cx, ry-2, cx+16, ry+14], 4,
+              fill=BLUE if on else (249,250,251), outline=None if on else LINE,
+              width=0 if on else 1)
+        if on:
+            d.text([cx+3, ry-1], "✓", font=f(12), fill=(255,255,255))
+        d.text([x+30, ry+22], hint, font=f(11), fill=MUTED)
+    rrect(d, [x+16, y+344, x+w-16, y+404], 12, fill=SOFT, outline=LINE, width=1)
+    d.text([x+30, y+356], "导出预览", font=f(13, True), fill=INK)
+    d.text([x+30, y+378], "## 1. 量子计算入门", font=f(11), fill=(55,65,81))
+    d.text([x+30, y+392], "> 量子比特可以同时处于两种状态", font=f(9), fill=MUTED)
+    popup_footer(d, x, y, w, h)
+
+def popup_settings(d, view="review"):
+    """设置面板示意：view="review" 是回顾 / 回收站那组，"export" 是导出模板那组。"""
     x, y, w, h = popup_shell(d)
     popup_tabs(d, x, y, w, 0)
+    if view == "export":
+        popup_export_settings(d, x, y, w)
+        return
     d.text([x+16, y+102], "设置", font=f(12, True), fill=INK)
     rrect(d, [x+16, y+126, x+w-16, y+322], 12, fill=CARD, outline=LINE, width=1)
     d.text([x+30, y+142], "每日回顾上限", font=f(13), fill=INK)
@@ -262,7 +298,8 @@ def popup_settings(d):
     d.line([x+30, y+262, x+w-30, y+262], fill=LINE, width=1)
     d.text([x+30, y+272], "回收站保留", font=f(13), fill=INK)
     rrect(d, [x+w-110, y+268, x+w-32, y+292], 7, fill=(249,250,251), outline=LINE, width=1)
-    d.text([x+w-100, y+273], "30 分钟 ▾", font=f(12), fill=INK)
+    d.text([x+w-100, y+273], "30 分钟", font=f(12), fill=INK)
+    caret(d, x+w-46, y+277)
     d.text([x+30, y+298], "删除后多久内还能撤销", font=f(11), fill=MUTED)
     rrect(d, [x+16, y+344, x+w-16, y+404], 12, fill=SOFT, outline=LINE, width=1)
     d.text([x+30, y+356], "秒存选区", font=f(13, True), fill=INK)
@@ -373,10 +410,11 @@ popup_footer(d, x, y, w, h, toast="已导出 3 条"); frames.append(im.copy())
 im, d, _ = base(); popup_review(d); frames.append(im.copy())
 im, d, _ = base(); popup_review(d, revealed=True); frames.append(im.copy())
 
-# 场景6：v1.2 —— 搜索命中高亮 / 标签管理 / 回顾设置
+# 场景6：v1.2 —— 搜索命中高亮 / 标签管理 / 回顾设置；v1.5 —— 导出模板设置
 im, d, _ = base(); popup_clips(d, hits=True); frames.append(im.copy())
 im, d, _ = base(); popup_clips(d, tagbox=True); frames.append(im.copy())
 im, d, _ = base(); popup_settings(d); frames.append(im.copy())
+im, d, _ = base(); popup_settings(d, view="export"); frames.append(im.copy())
 
 # 场景7：v1.2 —— 恢复差异预览（合并 / 覆盖本地 / 取消）
 im, d, _ = base(); restore_modal(d); frames.append(im.copy())
@@ -395,8 +433,8 @@ im, d, _ = base(); popup_clips(d, toast="已撤销删除 ✓"); frames.append(im
 # 场景11：v1.4 —— 重复收藏不再静默入库
 im, d, _ = base(); selection(d); page_toast(d, "这条已经在收藏里了"); frames.append(im.copy())
 
-durations = [700, 800, 1200, 1200, 900, 1000, 1000, 1100, 1000, 1800, 1200, 1300, 1200, 1400, 1600,
-             1600, 1200, 1500, 1200, 1800]
+durations = [700, 800, 1200, 1200, 900, 1000, 1000, 1100, 1000, 1800, 1200, 1300, 1200, 1600, 1400,
+             1600, 1600, 1200, 1500, 1200, 1800]
 assert len(durations) == len(frames), f"durations({len(durations)}) != frames({len(frames)})"
 frames[0].save(
     "/Users/liuxin/Documents/开源项目/ClipKeep/docs/demo.gif",

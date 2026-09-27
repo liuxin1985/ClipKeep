@@ -24,8 +24,9 @@
 ```bash
 npm install     # 只装 jsdom（devDependency）
 npm run check   # node --check 语法校验
-npm test        # 415 项断言：消息路由 / 并发写 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 /
-                # 高亮重放与同步 / 回收站撤销与保留时长 / v1.4 缺陷审计 / 回顾热力图 / 重复收藏 / Chrome-Safari 清单一致性
+npm test        # 460 项断言：消息路由 / 并发写 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 /
+                # 高亮重放与同步 / 回收站撤销与保留时长 / v1.4·v1.5 缺陷审计 / 回顾热力图 / 重复收藏 /
+                # 导出模板 / Chrome-Safari 清单一致性
 ```
 
 新增功能请顺带在 `test/clipkeep.test.mjs` 补几条断言；不确定怎么加可以在 Issue 里说，我们帮你写。
@@ -53,6 +54,14 @@ npm test        # 415 项断言：消息路由 / 并发写 / 快捷键链路 / �
   同 id 记录先 `dedupeById` 再合并。
 - 外部来源的数据字段白名单：id 用 `/^[\w-]{1,64}$/`，颜色取枚举值，数字字段夹取范围，
   拼进 HTML 前再 `esc()` 一次。
+- **来源地址只认协议白名单**：`popup.js` 的 `linkable()` 只放行 `http(s)` / `file`，
+  列表渲染和 Markdown 导出都用它——备份文件里的 `url` 是外部数据，
+  `javascript:` 之类不能变成扩展页里可点击的链接。写 Markdown 链接时用尖括号目的地
+  `[来源](<…>)`，否则 URL 里的括号会把链接写断。
+- **偏好按分区写**：`clipkeep_prefs` 里 `review` / `trash` / `export` 三个分区都通过
+  `savePrefs(section, patch)` 落盘，它一次读全量、逐区夹一遍合法值再写；
+  新增分区要同时补对应的 `*PrefsOf()` 夹取函数，别在面板里直接 `set({[PREFS_KEY]: …})`，
+  那样会把别的分区覆盖掉。
 - 新增文案优先中文，兼顾英文注释。
 - 不引入需要联网的 CDN（受 MV3 CSP 限制）。
 - 发版清单：`[4]` 测试会检查两份 manifest 对齐、清单引用的文件都在、
@@ -61,7 +70,6 @@ npm test        # 415 项断言：消息路由 / 并发写 / 快捷键链路 / �
 ## 好上手的第一批 Issue
 
 - 高亮颜色选择器（目前固定四色，🏷 面板与设置面板可作参考实现）。
-- 导出模板自定义（标题格式、是否带来源、Obsidian front-matter）。
 - 图片与链接剪藏（正文提取已有基础，`findMainContent` 可复用）。
 - 热力图支持点格子看当天复习了哪些卡（数据已在 `clipkeep_activity`）。
 - 英文 UI 与国际化文案层（`popup.html` / `content.js` 的中文串集中抽取）。

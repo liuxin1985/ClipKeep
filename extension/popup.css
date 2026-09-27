@@ -90,6 +90,11 @@ body {
   padding: 12px; margin-bottom: 10px; box-shadow: var(--shadow);
 }
 .item-text { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+/* 超长收藏默认折 6 行，点「展开全文」再放开（列表是滚动区，别被一条顶到天） */
+.item-text.is-clamped {
+  display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden;
+}
 .item-note {
   margin-top: 6px; font-size: 12px; color: var(--muted);
   border-left: 3px solid var(--accent-soft); padding-left: 8px; white-space: pre-wrap;
@@ -101,6 +106,13 @@ body {
 .item-meta .tag { background: var(--accent-soft); color: var(--accent); padding: 1px 7px; border-radius: 999px; }
 .item-meta a { color: var(--muted); text-decoration: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-meta a:hover { color: var(--accent); }
+.item-meta .item-src { color: var(--muted); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 超长收藏被截断的提醒标记 */
+.badge-warn {
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; color: #b45309; background: #fef3c7; vertical-align: 2px; white-space: nowrap;
+}
+body.dark .badge-warn { color: #fcd34d; background: rgba(252, 211, 77, .16); }
 .item-actions { display: flex; gap: 6px; margin-top: 10px; }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg); color: var(--text);

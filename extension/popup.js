@@ -11,12 +11,19 @@
   const TRASH_KEY = "clipkeep_trash";
   const PREFS_KEY = "clipkeep_prefs";
   const ACTIVITY_KEY = "clipkeep_activity"; // 每天回顾了多少条，画热力图用
+  const MAX_TEXT = 20000; // 与后台收藏写入的截断上限一致，标记时要说同一个数
+  const CLAMP_AT = 240; // 超过这个长度的收藏在列表里默认折叠
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
   const HEAT_WEEKS = 8; // 热力图展示最近 8 周
   const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长
   const DEFAULT_TRASH_MINS = 10;
-  const DEFAULT_PREFS = { review: { cap: 20, mult: 1 }, trash: { mins: DEFAULT_TRASH_MINS } };
+  const HEADINGS = ["numbered", "title", "text", "date"]; // Markdown 导出的小标题写法
+  const DEFAULT_PREFS = {
+    review: { cap: 20, mult: 1 },
+    trash: { mins: DEFAULT_TRASH_MINS },
+    export: { heading: "numbered", source: true, frontMatter: false },
+  };
 
   const $ = (id) => document.getElementById(id);
   const listEl = $("list");
@@ -86,6 +93,14 @@
 
   function hostname(url) {
     try { return new URL(url).hostname; } catch (_) { return url; }
+  }
+
+  /**
+   * 来源地址是外部数据（备份文件里想写什么写什么）：
+   * 只认 http(s) / file，javascript: 之类一律不作为链接渲染，也不写进 Markdown 链接。
+   */
+  function linkable(url) {
+    return /^(https?:|file:)/i.test(String(url || "")) ? String(url) : "";
   }
 
   /* ---------- 复习调度（Leitner 盒） ---------- */
@@ -158,9 +173,13 @@
 
   function syncSettings() {
     const { cap, mult } = reviewPrefs();
+    const tpl = exportPrefs();
     $("set-cap").value = String(cap);
     $("set-mult").value = String(mult);
     $("set-ttl").value = String(trashMins());
+    $("set-heading").value = tpl.heading;
+    $("set-source").checked = tpl.source;
+    $("set-fm").checked = tpl.frontMatter;
   }
 
   /**
@@ -171,6 +190,7 @@
     const next = { ...prefs, [section]: { ...(prefs[section] || {}), ...patch } };
     next.review = reviewPrefsOf(next);
     next.trash = { mins: trashMinsOf(next) };
+    next.export = exportPrefsOf(next);
     prefs = next;
     await API.storage.local.set({ [PREFS_KEY]: prefs });
     syncSettings();
@@ -187,6 +207,19 @@
   function trashMinsOf(p) {
     const m = Number((p && p.trash || {}).mins);
     return TRASH_MINS.indexOf(m) >= 0 ? m : DEFAULT_TRASH_MINS;
+  }
+
+  /** 导出模板：只认枚举值与布尔，非法写法（含备份里塞进来的字符串）一律回落默认 */
+  function exportPrefsOf(p) {
+    const e = (p && p.export) || {};
+    return {
+      heading: HEADINGS.indexOf(e.heading) >= 0 ? e.heading : DEFAULT_PREFS.export.heading,
+      source: e.source !== false,
+      frontMatter: e.frontMatter === true,
+    };
+  }
+  function exportPrefs() {
+    return exportPrefsOf(prefs);
   }
 
   function applyTheme(mode) {
@@ -285,20 +318,30 @@
 
   function itemNode(it) {
     const q = searchEl.value;
+    const text = String(it.text || "");
+    const longClip = text.length > CLAMP_AT; // 一屏读不完的收藏默认折叠，别把整列顶走
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
+    const src = linkable(it.url);
     const link = it.url
-      ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" title="${esc(it.title || it.url)}">${esc(it.title || hostname(it.url))}</a>`
+      ? src
+        ? `<a href="${esc(src)}" target="_blank" rel="noopener" title="${esc(it.title || src)}">${esc(it.title || hostname(src))}</a>`
+        : `<span class="item-src" title="来源不是可点击的地址">${esc(it.title || it.url)}</span>`
+      : "";
+    // 收藏正文超过 2 万字会被截断，标记要露出来，否则用户不知道内容不完整
+    const trunc = it.truncated
+      ? `<span class="badge-warn" title="内容超过 ${MAX_TEXT} 字，仅保存了前半部分">已截断</span>`
       : "";
     const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
     return `
       <div class="item" data-id="${esc(it.id)}">
-        <div class="item-text">${hit(it.text, q)}</div>
+        <div class="item-text${longClip ? " is-clamped" : ""}">${hit(text, q)}</div>
         ${note}
-        <div class="item-meta">${tags}${link}<span>${fmtDate(it.createdAt)}</span></div>
+        <div class="item-meta">${trunc}${tags}${link}<span>${fmtDate(it.createdAt)}</span></div>
         <div class="item-actions">
           <button class="mini-btn" data-act="copy">复制</button>
           <button class="mini-btn" data-act="tag">加标签</button>
           <button class="mini-btn" data-act="export">导出</button>
+          ${longClip ? `<button class="mini-btn" data-act="more">展开全文</button>` : ""}
           <button class="mini-btn danger" data-act="del">删除</button>
         </div>
       </div>`;
@@ -530,6 +573,9 @@
   $("set-cap").addEventListener("change", (e) => savePrefs("review", { cap: Number(e.target.value) }));
   $("set-mult").addEventListener("change", (e) => savePrefs("review", { mult: Number(e.target.value) }));
   $("set-ttl").addEventListener("change", (e) => savePrefs("trash", { mins: Number(e.target.value) }));
+  $("set-heading").addEventListener("change", (e) => savePrefs("export", { heading: e.target.value }));
+  $("set-source").addEventListener("change", (e) => savePrefs("export", { source: e.target.checked }));
+  $("set-fm").addEventListener("change", (e) => savePrefs("export", { frontMatter: e.target.checked }));
 
   /* ---------- 回顾热力图 ---------- */
 
@@ -560,14 +606,16 @@
 
   function heatHtml() {
     const cells = heatCells();
-    const weekAgo = Date.now() - 7 * DAY;
-    const week = cells.reduce((s, c) => (c.future || Date.parse(c.key) < weekAgo ? s : s + c.n), 0);
+    // 含今天往前数 7 天：ISO 日期串按字典序比较即可，别用 Date.parse（它按 UTC 解析，有时区偏移）
+    const from = dayKey(Date.now() - 6 * DAY);
+    const week = cells.reduce((s, c) => (c.future || c.key < from ? s : s + c.n), 0);
     const total = Object.keys(activity).reduce((s, k) => s + (Number(activity[k]) || 0), 0);
     let streak = 0;
-    for (let i = cells.length - 1; i >= 0; i--) {
-      const c = cells[i];
-      if (c.future) continue;
-      if (c.n > 0) streak++;
+    let idx = cells.length - 1;
+    while (idx >= 0 && cells[idx].future) idx--; // 跳过本周还没到的格子
+    if (idx >= 0 && cells[idx].n === 0) idx--;   // 今天还没打卡，连续纪录从昨天起算，别清零
+    for (; idx >= 0; idx--) {
+      if (cells[idx].n > 0) streak++;
       else break;
     }
     const grid = cells
@@ -682,6 +730,10 @@
       toast(res && res.ok ? "标签已更新" : "保存失败，请重试");
     } else if (act === "export") {
       download(mdOf([it]), `clipkeep-${it.id}.md`);
+    } else if (act === "more") {
+      const box = row.querySelector(".item-text");
+      const stillClamped = box.classList.toggle("is-clamped"); // 还折叠着就把按钮留作「展开」
+      btn.textContent = stillClamped ? "展开全文" : "收起";
     }
   });
 
@@ -736,14 +788,35 @@
     document.body.removeChild(ta);
   }
 
+  /** 小标题写法：编号+来源 / 仅来源标题 / 正文首句 / 收藏时间 */
+  function headingOf(it, i, tpl) {
+    if (tpl === "date") return fmtDate(it.createdAt);
+    if (tpl === "text") {
+      const first = String(it.text || "").split(/[\n。！？!?]/)[0].trim() || "未命名";
+      return first.length > 24 ? first.slice(0, 24) + "…" : first;
+    }
+    const name = it.title || hostname(it.url) || "未命名";
+    return tpl === "title" ? name : `${i + 1}. ${name}`;
+  }
+
   function mdOf(arr) {
-    const lines = ["# ClipKeep 收藏", "", `> 导出于 ${fmtDate(Date.now())} · 共 ${arr.length} 条`, ""];
+    const tpl = exportPrefs();
+    const lines = [];
+    if (tpl.frontMatter) {
+      // Obsidian 读文件顶部的 YAML 块作为笔记属性
+      lines.push("---", "title: ClipKeep 收藏", `exported: ${fmtDate(Date.now())}`, `count: ${arr.length}`, "---", "");
+    }
+    lines.push("# ClipKeep 收藏", "", `> 导出于 ${fmtDate(Date.now())} · 共 ${arr.length} 条`, "");
     arr.forEach((it, i) => {
-      lines.push(`## ${i + 1}. ${it.title || hostname(it.url) || "未命名"}`);
+      lines.push(`## ${headingOf(it, i, tpl.heading)}`);
       if (it.tags && it.tags.length) lines.push("", "`" + it.tags.map((t) => "#" + t).join(" ") + "`");
       lines.push("", "> " + String(it.text).replace(/\n/g, "\n> "));
       if (it.note) lines.push("", "**备注：** " + it.note);
-      if (it.url) lines.push("", `[来源](${it.url})`);
+      if (it.url && tpl.source) {
+        const src = linkable(it.url);
+        // 尖括号包住目的地：URL 里的括号（维基太常见）不会把链接写断
+        lines.push("", src ? `[来源](<${src.replace(/[<>\n\r]/g, " ")}>)` : `来源：${String(it.url).replace(/\s+/g, " ")}`);
+      }
       lines.push("", `*${fmtDate(it.createdAt)}*`, "", "---", "");
     });
     return lines.join("\n");
