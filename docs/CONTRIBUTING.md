@@ -24,9 +24,9 @@
 ```bash
 npm install     # 只装 jsdom（devDependency）
 npm run check   # node --check 语法校验
-npm test        # 460 项断言：消息路由 / 并发写 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 /
-                # 高亮重放与同步 / 回收站撤销与保留时长 / v1.4·v1.5 缺陷审计 / 回顾热力图 / 重复收藏 /
-                # 导出模板 / Chrome-Safari 清单一致性
+npm test        # 618 项断言：消息路由 / 并发写 / 快捷键链路 / 标签管理 / Leitner 排期 / 恢复三选一 /
+                # 高亮重放与同步 / 回收站撤销与保留时长 / v1.4·v1.5·v1.6 缺陷审计 / 回顾热力图与格子下钻 /
+                # 重复收藏 / 导出模板 / 图片与链接剪藏 / 高亮颜色 / Chrome-Safari 清单一致性
 ```
 
 新增功能请顺带在 `test/clipkeep.test.mjs` 补几条断言；不确定怎么加可以在 Issue 里说，我们帮你写。
@@ -58,6 +58,20 @@ npm test        # 460 项断言：消息路由 / 并发写 / 快捷键链路 / �
   列表渲染和 Markdown 导出都用它——备份文件里的 `url` 是外部数据，
   `javascript:` 之类不能变成扩展页里可点击的链接。写 Markdown 链接时用尖括号目的地
   `[来源](<…>)`，否则 URL 里的括号会把链接写断。
+- **图片 / 链接收藏的「类型 + 地址」成对校验**：`kind` 只认 `image` / `link`，
+  地址必须过 `mediaUrlOk()`（`http(s)` 且不超过 `MEDIA_MAX`），否则整对字段一起丢掉、退回普通文字收藏——
+  留着 `kind:"image"` 却没有合法地址，列表里就是一张点开没反应的假图片徽标。
+  超长地址**不收也不截**：截断会把它变成另一个能点开的地址，用户以为存的就是原来那条。
+  弹窗侧 `mediaOf()` 是同一套判断的镜像，导出与复制都走它，别再开第二个出口。
+- **`clipkeep:update` 只认字段白名单**（`UPDATABLE`）：改标签不该顺手把 `createdAt`、`truncated`
+  或任意未知字段写进存储，`review` 还要再过一遍 `cleanReview` 夹取。
+  新增可编辑字段时记得同时加进白名单，别把合并放回开放模式。
+- **打卡活动记录有两种格式**：`clipkeep_activity` 的日记录 v1.5 及以前是数字，v1.6 起是 `{ n, ids }`。
+  读写两端都先用 `activityOf()` 归一化，统计口径取 `n`，明细取 `ids`（上限 `ACT_IDS_MAX`）；
+  不要假设它一定是对象，也不要迁移老数据。
+- **高亮颜色枚举四处同源**：`background.js` 与 `popup.js` 的 `HL_COLORS`、
+  `content.js` 的 `COLORS`、`popup.js` 的 `COLOR_HEX` 必须是同一套色名与色值，
+  清单一致性测试会直接比对源码；加一种颜色要四处都改，漏一处就会出现「存得进、看不见」的颜色。
 - **偏好按分区写**：`clipkeep_prefs` 里 `review` / `trash` / `export` 三个分区都通过
   `savePrefs(section, patch)` 落盘，它一次读全量、逐区夹一遍合法值再写；
   新增分区要同时补对应的 `*PrefsOf()` 夹取函数，别在面板里直接 `set({[PREFS_KEY]: …})`，
