@@ -16,6 +16,7 @@
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
   const HEAT_WEEKS = 8; // 热力图展示最近 8 周
+  const HEAT_ROWS_MAX = 100; // 格子下钻最多渲染多少条明细（和后台 ACT_IDS_MAX 对齐）
   const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长
   const DEFAULT_TRASH_MINS = 10;
   const HEADINGS = ["numbered", "title", "text", "date"]; // Markdown 导出的小标题写法
@@ -683,13 +684,18 @@
     if (!heatDay) return `<div class="heat-day" id="heat-day" hidden></div>`;
     const a = activityOf(activity[heatDay]);
     if (a.n <= 0) return `<div class="heat-day" id="heat-day" hidden></div>`;
-    const rows = a.ids
+    const listed = a.ids.slice(0, HEAT_ROWS_MAX);
+    const rows = listed
       .map((id) => {
         const it = items.find((x) => x && x.id === id);
         const label = it ? String(it.text).slice(0, 60) : "（这条收藏已删除）";
         return `<li>${it ? esc(label) : `<span class="muted">${esc(label)}</span>`}</li>`;
       })
       .join("");
+    // 明细最多存 100 条，手改过的记录可能有几百个 id：全渲染会把回顾页撑死
+    const overflow = a.ids.length > listed.length
+      ? `<p class="heat-day-note">仅显示前 ${listed.length} 条，另有 +${a.ids.length - listed.length} 条未列出。</p>`
+      : "";
     const note = a.ids.length
       ? ""
       : `<p class="heat-day-note">这条记录来自旧版本，只存了当天条数，没有复习明细。</p>`;
@@ -699,7 +705,7 @@
           <span>${esc(heatDay)} · 复习 ${a.n} 条</span>
           <button class="mini-btn heat-day-close" data-act="heat-close">收起</button>
         </div>
-        ${note}${a.ids.length ? `<ul class="heat-day-list">${rows}</ul>` : ""}
+        ${note}${a.ids.length ? `<ul class="heat-day-list">${rows}</ul>${overflow}` : ""}
       </div>`;
   }
 

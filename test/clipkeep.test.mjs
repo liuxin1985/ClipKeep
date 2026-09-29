@@ -2040,6 +2040,79 @@ async function testHeatDrill() {
   }
 }
 
+/* ---------------- 12. v1.6 缺陷审计：改收藏的字段白名单 / 超长地址 / 明细上限 ---------------- */
+
+async function testV16Audit() {
+  console.log("\n[12] v1.6 审计：update 字段白名单、超长媒体地址、下钻明细渲染上限");
+  const now = Date.now();
+  const IMG = "https://cdn.example.com/img/cat.png";
+
+  /* 1. update 的 patch 不能想写什么写什么：改标签不该顺手改掉时间、截断标记和排期 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [{
+      id: "u1", text: "原文", note: "备注", tags: ["旧"], url: "http://x/1", title: "T",
+      createdAt: now - 5000, truncated: true, review: { box: 2, due: now, seen: 1 },
+    }];
+    const r = await be.send({
+      type: "clipkeep:update",
+      id: "u1",
+      patch: { tags: "新", createdAt: 1, truncated: false, junk: "<img src=x>", review: { box: 999, due: -5, seen: -3 } },
+    });
+    ok("update 仍然成功", r.ok === true, JSON.stringify(r));
+    const it = be.store.clipkeep_items[0];
+    eq("白名单字段照常更新", it.tags.join(","), "新");
+    eq("收藏时间不被 patch 改写", it.createdAt, now - 5000);
+    eq("截断标记不被 patch 抹掉", it.truncated, true);
+    ok("未知字段不进存储", !("junk" in it), JSON.stringify(it));
+    ok("排期被夹到合法区间", it.review.box <= 5 && it.review.box >= 0 && it.review.due > 0 && it.review.seen >= 0,
+      JSON.stringify(it.review));
+  }
+
+  /* 2. 超长地址：要么原样存，要么不收，不能截成另一个能点开的地址 */
+  {
+    const be = makeBackend();
+    const long = "https://cdn.example.com/i/" + "a".repeat(3000) + ".png";
+    const r = await be.send({ type: "clipkeep:add", payload: { text: "cat.png", kind: "image", image: long } });
+    ok("超长地址的收藏仍入库", r.ok === true);
+    ok("超长地址不被截断保存", !r.item.image, `image 长度=${(r.item.image || "").length}`);
+    ok("地址非法时不再冒充图片", r.item.kind === undefined, JSON.stringify(r.item));
+  }
+  {
+    const be = makeBackend();
+    const long = "https://cdn.example.com/i/" + "a".repeat(3000) + ".png";
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-image", srcUrl: long, pageUrl: "https://blog/p" },
+      { id: 1, title: "T", url: "https://blog/p" }
+    );
+    eq("右键剪藏超长地址不写入", be.store.clipkeep_items.length, 0);
+    ok("右键剪藏超长地址给出说明", /无法收藏/.test(be.sentToTab.map((s) => s.msg.message).join("|")),
+      JSON.stringify(be.sentToTab));
+  }
+
+  /* 3. 下钻明细的渲染量要有上限：手改过的活动记录不能把回顾页撑死 */
+  {
+    const ids = Array.from({ length: 160 }, (_, i) => "z" + i);
+    const p = await mountPopup({
+      clipkeep_items: [{ id: "z159", text: "最后一条", note: "", tags: [], url: "", title: "", createdAt: now }],
+      clipkeep_activity: (() => {
+        const d = new Date(Date.now() - 86400000);
+        const pad = (n) => String(n).padStart(2, "0");
+        const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        const o = {};
+        o[key] = { n: 160, ids };
+        return o;
+      })(),
+    });
+    await p.click(p.qa(".tab").find((t) => t.dataset.view === "review"));
+    const cell = p.qa(".heat i").find((c) => Number(c.dataset.n) >= 160);
+    await p.click(cell);
+    const rows = p.qa("#heat-day .heat-day-list li");
+    ok("明细渲染有条数上限", rows.length > 0 && rows.length <= 100, `rows=${rows.length}`);
+    ok("上限之外说明还有多少", /\+\s*60/.test(p.$("heat-day").textContent), p.$("heat-day").textContent);
+  }
+}
+
 /* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
@@ -2113,7 +2186,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testManifests];
   for (const s of suites) {
     try {
       await s();

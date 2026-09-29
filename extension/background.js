@@ -117,14 +117,24 @@ function normalizeTags(tags) {
 }
 
 /**
+ * 可剪藏的地址：只认 http(s)，且不能超长。
+ * 超长地址要么原样存、要么不收——截断成另一个能点开的地址最坏，
+ * 用户会以为自己存的就是那条。
+ */
+function mediaUrlOk(v) {
+  const url = String(v || "").trim();
+  return HTTP_ONLY.test(url) && url.length <= MEDIA_MAX;
+}
+
+/**
  * 图片 / 链接收藏的目标地址。
  * 类型和地址要配对：kind 说自己是图片，地址却非法，就当普通文字收藏，
  * 否则列表里会出现一张点开没反应的「图片」。
  */
 function mediaOf(raw) {
   if (!raw || MEDIA_KINDS.indexOf(raw.kind) < 0) return {};
-  const url = String(raw.kind === "image" ? raw.image || "" : raw.link || "").trim().slice(0, MEDIA_MAX);
-  if (!HTTP_ONLY.test(url)) return {};
+  const url = String(raw.kind === "image" ? raw.image || "" : raw.link || "").trim();
+  if (!mediaUrlOk(url)) return {};
   return raw.kind === "image" ? { kind: "image", image: url } : { kind: "link", link: url };
 }
 
@@ -230,12 +240,22 @@ function deleteItem(id) {
   });
 }
 
+/** 编辑一条收藏时允许改的字段；其余（时间、截断标记、手加的未知键）一律不进存储 */
+const UPDATABLE = ["text", "note", "tags", "kind", "image", "link", "review"];
+
 function updateItem(id, patch) {
   return mutate((items) => {
     const idx = items.findIndex((it) => it.id === id);
     if (idx === -1) return { result: { ok: false, error: "not_found" } };
-    const p = { ...(patch || {}) }; // 不改调用方传进来的对象
+    const src = patch || {};
+    const p = {}; // 白名单取字段：改个标签不该顺手改掉收藏时间、截断标记或塞进未知字段
+    for (const k of UPDATABLE) if (src[k] !== undefined) p[k] = src[k];
     if (p.tags !== undefined) p.tags = normalizeTags(p.tags);
+    if (p.review !== undefined) {
+      const rv = cleanReview(p.review); // 排期由后台复盘一遍，盒号/时间越界就夹回来
+      if (rv) p.review = rv;
+      else delete p.review;
+    }
     // 类型与地址要配对校验：改一条收藏不能塞进 javascript: 地址，
     // 也不能只写 kind:"text" 就把原来的图片地址留在身上
     const touchMedia = p.kind !== undefined || p.image !== undefined || p.link !== undefined;
@@ -560,9 +580,10 @@ if (API.contextMenus && API.contextMenus.onClicked) {
     } else if (info.menuItemId === "clipkeep-save-image" || info.menuItemId === "clipkeep-save-link") {
       const isImage = info.menuItemId === "clipkeep-save-image";
       const url = isImage ? info.srcUrl : info.linkUrl;
-      // 地址要在入库前判协议：伪协议在菜单里点得到，但绝不能变成可点的链接
-      if (!HTTP_ONLY.test(String(url || ""))) {
-        notifyTab(tab.id, { type: "clipkeep:toast", message: "这个地址不是网页链接，无法收藏" });
+      // 地址要在入库前判协议和长度：伪协议在菜单里点得到，但绝不能变成可点的链接，
+      // 超长地址也不能悄悄截成另一个地址
+      if (!mediaUrlOk(url)) {
+        notifyTab(tab.id, { type: "clipkeep:toast", message: "这个地址无法收藏（不是 http(s) 或过长）" });
         return;
       }
       const label = isImage ? imageLabel(url) : (info.selectionText || "").trim() || linkLabel(url);
