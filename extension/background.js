@@ -16,6 +16,7 @@ const MAX_TEXT = 20000; // 单次收藏的文本上限，避免一次粘贴撑�
 const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长（分钟）
 const DEFAULT_TRASH_MINS = 10;
 const ACTIVITY_DAYS = 120; // 活动记录只留最近 120 天
+const ACT_IDS_MAX = 100; // 每天最多留多少条复习明细，供热力图格子下钻查看
 const INTERVALS = 6; // 记忆盒数量，用于把外部数据的盒号夹到合法区间
 const HL_COLORS = ["yellow", "green", "pink", "blue"];
 const SAFE_ID = /^[\w-]{1,64}$/; // 外部数据的 id 只允许安全字符，避免拼进 HTML 时越出属性
@@ -277,6 +278,22 @@ function validReview(r) {
 }
 
 /**
+ * 活动记录有两种历史格式：v1.5 及以前是当天条数的数字，v1.6 起是 { n, ids }。
+ * 读的时候都归一化，老数据不用迁移，也不会被当成非法记录清掉。
+ */
+function activityOf(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return { n: Math.max(0, Math.floor(v)), ids: [] };
+  if (v && typeof v === "object") {
+    const n = Number(v.n);
+    return {
+      n: Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0,
+      ids: Array.isArray(v.ids) ? v.ids.map(String).filter((x) => SAFE_ID.test(x)).slice(-ACT_IDS_MAX) : [],
+    };
+  }
+  return { n: 0, ids: [] };
+}
+
+/**
  * 打分：更新排期 + 记一次当日回顾活动。
  * 两件事在同一条写链的一步里完成，不会出现「分数存了、热力图没加」的半更新。
  */
@@ -294,11 +311,14 @@ function gradeItem(id, review) {
     const log = (activity && typeof activity === "object" && !Array.isArray(activity)) ? activity : {};
     for (const k of Object.keys(log)) {
       const t = Date.parse(k);
-      if (!Number.isFinite(t) || t < cutoff || !(Number(log[k]) > 0)) delete log[k];
+      if (!Number.isFinite(t) || t < cutoff || activityOf(log[k]).n <= 0) delete log[k];
     }
-    log[day] = (Number(log[day]) || 0) + 1;
+    const prev = activityOf(log[day]);
+    // 明细只留最近 ACT_IDS_MAX 条：够回看当天复习了什么，长期跑也不会无限膨胀
+    const ids = prev.ids.includes(id) ? prev.ids : prev.ids.concat(id).slice(-ACT_IDS_MAX);
+    log[day] = { n: prev.n + 1, ids };
     await API.storage.local.set({ [ACTIVITY_KEY]: log });
-    return { write: true, items, result: { ok: true, day, count: log[day] } };
+    return { write: true, items, result: { ok: true, day, count: log[day].n } };
   });
 }
 

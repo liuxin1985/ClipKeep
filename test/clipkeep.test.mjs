@@ -1364,12 +1364,12 @@ async function testActivity() {
     const r = await be.send({ type: "clipkeep:grade", id, review: { box: 1, due: now + DAY, seen: 1 } });
     ok("grade 返回成功", r.ok === true);
     eq("排期已写入", be.store.clipkeep_items[0].review.box, 1);
-    eq("当日活动 +1", be.store.clipkeep_activity[dkey(now)], 1);
+    eq("当日活动 +1", be.store.clipkeep_activity[dkey(now)].n, 1);
     await be.send({ type: "clipkeep:grade", id, review: { box: 2, due: now + 3 * DAY, seen: 2 } });
-    eq("同日再打累计加", be.store.clipkeep_activity[dkey(now)], 2);
+    eq("同日再打累计加", be.store.clipkeep_activity[dkey(now)].n, 2);
     const nf = await be.send({ type: "clipkeep:grade", id: "nope", review: { box: 3, due: now, seen: 1 } });
     ok("未知 id 返回 not_found", nf.ok === false && nf.error === "not_found");
-    eq("打分为未知 id 不记活动", be.store.clipkeep_activity[dkey(now)], 2);
+    eq("打分为未知 id 不记活动", be.store.clipkeep_activity[dkey(now)].n, 2);
     eq("排期没被非法打分改掉", be.store.clipkeep_items[0].review.box, 2);
     const bad = await be.send({ type: "clipkeep:grade", id, review: { box: "99", due: "abc", seen: -1 } });
     ok("非法排期被拒绝", bad.ok === false, JSON.stringify(bad));
@@ -1410,7 +1410,7 @@ async function testActivity() {
     await p.click(p.q('[data-act="reveal"]'));
     await p.click(p.q('.rev-grade [data-g="1"]'));
     await tick(30);
-    eq("打分写入活动记录", p.store.clipkeep_activity[dkey(now)], 3);
+    eq("打分写入活动记录", p.store.clipkeep_activity[dkey(now)].n, 3);
     const cells2 = p.qa(".heat i");
     eq("热力图今日等级随之升高", Number(cellOf(cells2, dkey(now)).dataset.lvl), 2);
     ok("统计跟着刷新", /本周\s*9/.test(p.$("heat-stats").textContent), p.$("heat-stats").textContent);
@@ -1942,6 +1942,104 @@ async function testMediaClips() {
   }
 }
 
+/* ---------------- 11. 热力图格子下钻当天复习 ---------------- */
+
+async function testHeatDrill() {
+  console.log("\n[11] 热力图下钻：当天复习明细（新格式 {n, ids} + 旧格式数字兼容）");
+  const DAY = 86400000;
+  const dk = (back) => {
+    const d = new Date(Date.now() - back * DAY);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  const mk = (id, text) => ({ id, text, note: "", tags: [], url: "", title: "", createdAt: Date.now() });
+
+  /* 1. 后台：打分记录当天明细，同一条重复打分不重复记 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("g1", "第一条"), mk("g2", "第二条")];
+    const r1 = await be.send({ type: "clipkeep:grade", id: "g1", review: { box: 1, due: Date.now() + DAY } });
+    const r2 = await be.send({ type: "clipkeep:grade", id: "g2", review: { box: 0, due: Date.now() } });
+    const r3 = await be.send({ type: "clipkeep:grade", id: "g1", review: { box: 2, due: Date.now() + 3 * DAY } });
+    eq("第一次打分的当天条数", r1.count, 1);
+    eq("第二次打分的当天条数", r2.count, 2);
+    eq("同一条重复打分也计一次动作", r3.count, 3);
+    const log = be.store.clipkeep_activity[r1.day];
+    ok("活动记录带条数", Number(log.n) === 3, JSON.stringify(log));
+    eq("当天明细去重后是两条", (log.ids || []).length, 2);
+    ok("明细里是打过的收藏", JSON.stringify((log.ids || []).slice().sort()) === JSON.stringify(["g1", "g2"]), JSON.stringify(log.ids));
+  }
+
+  /* 2. 旧格式（纯数字）要能读、能接着写，且不会被当成非法记录清掉 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("g1", "第一条")];
+    be.store.clipkeep_activity = { [dk(1)]: 4, [dk(3)]: 0, [dk(400)]: 7 };
+    const r = await be.send({ type: "clipkeep:grade", id: "g1", review: { box: 1, due: Date.now() } });
+    eq("今天从 0 开始记", r.count, 1);
+    eq("昨天的旧格式记录还在", Number(be.store.clipkeep_activity[dk(1)].n ?? be.store.clipkeep_activity[dk(1)]), 4);
+    ok("旧格式记录没被清零", be.store.clipkeep_activity[dk(1)] !== undefined, JSON.stringify(be.store.clipkeep_activity));
+    ok("计数为 0 的旧记录被清掉", be.store.clipkeep_activity[dk(3)] === undefined);
+    ok("超出保留窗口的记录被清掉", be.store.clipkeep_activity[dk(400)] === undefined);
+  }
+
+  /* 3. 明细有条数上限，长期跑不会无限膨胀 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = Array.from({ length: 110 }, (_, i) => mk("k" + i, "第" + i + "条"));
+    for (const it of be.store.clipkeep_items) {
+      await be.send({ type: "clipkeep:grade", id: it.id, review: { box: 0, due: Date.now() } });
+    }
+    const log = be.store.clipkeep_activity[dk(0)];
+    eq("当天计数如实累计", Number(log.n), 110);
+    ok("明细只留最近若干条", (log.ids || []).length <= 100 && (log.ids || []).length > 0,
+      `ids=${(log.ids || []).length}`);
+    eq("留的是最近打过的", log.ids?.at(-1), "k109");
+  }
+
+  /* 4. 弹窗：格子可点开看当天明细 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("g1", "第一条：叠加态"), mk("g2", "第二条：纠缠")],
+      clipkeep_activity: { [dk(1)]: { n: 2, ids: ["g1", "gone"] }, [dk(2)]: 3 },
+    });
+    await p.click(p.qa(".tab").find((t) => t.dataset.view === "review"));
+    const cells = p.qa(".heat i");
+    eq("热力图格子数量", cells.length, 56);
+    const yest = cells.find((c) => c.dataset.day === dk(1));
+    ok("昨天的格子存在", !!yest);
+    ok("格子可点击", yest.classList.contains("clickable"), yest.className);
+    await p.click(p.qa(".heat i").find((c) => c.dataset.day === dk(1)));
+    const panel = p.$("heat-day");
+    ok("点格子展开当天明细", !!panel && !panel.hidden, p.$("review").innerHTML.slice(0, 300));
+    ok("明细标出日期与条数", panel.textContent.includes(dk(1)) && /2 条/.test(panel.textContent), panel.textContent);
+    ok("明细列出当天复习过的收藏", /第一条：叠加态/.test(panel.textContent), panel.textContent);
+    ok("已删除的收藏如实说明", /已删除/.test(panel.textContent), panel.textContent);
+    await p.click(p.qa('.heat i[data-day="' + dk(2) + '"]')[0]);
+    ok("切到旧格式记录也能看条数", /3 条/.test(p.$("heat-day").textContent), p.$("heat-day").textContent);
+    ok("旧记录没有明细时如实说明", /明细|升级/.test(p.$("heat-day").textContent), p.$("heat-day").textContent);
+    await p.click(p.$("heat-day").querySelector(".heat-day-close"));
+    ok("明细可以关掉", p.$("heat-day").hidden === true);
+    await p.click(p.qa(".heat i").find((c) => c.dataset.day === dk(5)));
+    ok("没打卡的格子不展开明细", p.$("heat-day").hidden === true);
+    await p.click(p.qa(".heat i.future")[0]);
+    ok("未来的格子点了没反应", p.$("heat-day").hidden === true);
+  }
+
+  /* 5. 统计口径兼容两种记录格式 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("g1", "第一条")],
+      clipkeep_activity: { [dk(0)]: { n: 2, ids: ["g1"] }, [dk(1)]: 3, [dk(30)]: { n: 1, ids: [] } },
+    });
+    await p.click(p.qa(".tab").find((t) => t.dataset.view === "review"));
+    const stats = p.$("heat-stats").textContent;
+    ok("累计把新旧格式都算进去", /累计 6/.test(stats), stats);
+    ok("本周条数含昨天的旧格式", /本周 5/.test(stats), stats);
+    ok("连续天数按新格式判定", /连续 2 天/.test(stats), stats);
+  }
+}
+
 /* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
@@ -2015,7 +2113,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testManifests];
   for (const s of suites) {
     try {
       await s();

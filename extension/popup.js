@@ -54,6 +54,7 @@
   let toastTimer = null;
   let pendingRestore = null;
   let grading = false; // 回顾打分写入中
+  let heatDay = ""; // 热力图里点开要看明细的那一天，空表示没展开
 
   function toast(msg) {
     toastEl.textContent = msg;
@@ -617,6 +618,19 @@
     return n <= 0 ? 0 : n < 3 ? 1 : n < 6 ? 2 : 3;
   }
 
+  /** 活动记录兼容旧版数字与新版 { n, ids }，与后台 activityOf 同一套读法 */
+  function activityOf(v) {
+    if (typeof v === "number" && Number.isFinite(v)) return { n: Math.max(0, Math.floor(v)), ids: [] };
+    if (v && typeof v === "object") {
+      const n = Number(v.n);
+      return {
+        n: Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0,
+        ids: Array.isArray(v.ids) ? v.ids.map(String) : [],
+      };
+    }
+    return { n: 0, ids: [] };
+  }
+
   /** 8 周 × 7 天，按星期对齐（每列一周，周日到周六），本周末端之后的天留空格 */
   function heatCells() {
     const today = new Date();
@@ -626,7 +640,8 @@
     for (let i = 0; i < HEAT_WEEKS * 7; i++) {
       const t = start + i * DAY;
       const key = dayKey(t);
-      cells.push({ key, n: Number(activity[key]) || 0, future: t > today.getTime() });
+      const a = activityOf(activity[key]);
+      cells.push({ key, n: a.n, future: t > today.getTime() });
     }
     return cells;
   }
@@ -636,7 +651,7 @@
     // 含今天往前数 7 天：ISO 日期串按字典序比较即可，别用 Date.parse（它按 UTC 解析，有时区偏移）
     const from = dayKey(Date.now() - 6 * DAY);
     const week = cells.reduce((s, c) => (c.future || c.key < from ? s : s + c.n), 0);
-    const total = Object.keys(activity).reduce((s, k) => s + (Number(activity[k]) || 0), 0);
+    const total = Object.keys(activity).reduce((s, k) => s + activityOf(activity[k]).n, 0);
     let streak = 0;
     let idx = cells.length - 1;
     while (idx >= 0 && cells[idx].future) idx--; // 跳过本周还没到的格子
@@ -647,9 +662,9 @@
     }
     const grid = cells
       .map((c) => {
-        const cls = c.future ? " future" : "";
-        const tip = `${c.key}${c.n ? ` · 回顾 ${c.n} 条` : ""}`;
-        return `<i class="lv${heatLvl(c.n)}${cls}" data-day="${c.key}" data-lvl="${heatLvl(c.n)}" title="${esc(tip)}"></i>`;
+        const cls = c.future ? " future" : c.n > 0 ? " clickable" : "";
+        const tip = `${c.key}${c.n ? ` · 回顾 ${c.n} 条，点开看明细` : ""}`;
+        return `<i class="lv${heatLvl(c.n)}${cls}" data-day="${c.key}" data-n="${c.n}" data-lvl="${heatLvl(c.n)}" title="${esc(tip)}"></i>`;
       })
       .join("");
     return `
@@ -659,6 +674,32 @@
           <span class="heat-stats" id="heat-stats">本周 ${week} · 连续 ${streak} 天 · 累计 ${total}</span>
         </div>
         <div class="heat">${grid}</div>
+        ${heatDayHtml()}
+      </div>`;
+  }
+
+  /** 格子下钻：这一天复习了几条、分别是哪些收藏；旧记录只有条数时如实说明 */
+  function heatDayHtml() {
+    if (!heatDay) return `<div class="heat-day" id="heat-day" hidden></div>`;
+    const a = activityOf(activity[heatDay]);
+    if (a.n <= 0) return `<div class="heat-day" id="heat-day" hidden></div>`;
+    const rows = a.ids
+      .map((id) => {
+        const it = items.find((x) => x && x.id === id);
+        const label = it ? String(it.text).slice(0, 60) : "（这条收藏已删除）";
+        return `<li>${it ? esc(label) : `<span class="muted">${esc(label)}</span>`}</li>`;
+      })
+      .join("");
+    const note = a.ids.length
+      ? ""
+      : `<p class="heat-day-note">这条记录来自旧版本，只存了当天条数，没有复习明细。</p>`;
+    return `
+      <div class="heat-day" id="heat-day">
+        <div class="heat-day-head">
+          <span>${esc(heatDay)} · 复习 ${a.n} 条</span>
+          <button class="mini-btn heat-day-close" data-act="heat-close">收起</button>
+        </div>
+        ${note}${a.ids.length ? `<ul class="heat-day-list">${rows}</ul>` : ""}
       </div>`;
   }
 
@@ -712,8 +753,21 @@
   }
 
   reviewEl.addEventListener("click", async (e) => {
+    const cell = e.target.closest(".heat i");
+    if (cell) {
+      // 点格子下钻当天明细；没打卡的格子点了不展开，再点一次收起
+      const day = cell.dataset.day;
+      heatDay = Number(cell.dataset.n) > 0 ? (heatDay === day ? "" : day) : "";
+      render();
+      return;
+    }
     const btn = e.target.closest("[data-act]");
     if (!btn) return;
+    if (btn.dataset.act === "heat-close") {
+      heatDay = "";
+      render();
+      return;
+    }
     const card = reviewEl.querySelector(".rev-card");
     if (!card) return;
     const id = card.dataset.id;

@@ -345,3 +345,15 @@ kbd {
 .heat i.lv2 { background: var(--heat-2); }
 .heat i.lv3 { background: var(--heat-3); }
 .heat i.future { opacity: 0.25; }
+/* 打过卡的日子可以点开看当天复习了什么 */
+.heat i.clickable { cursor: pointer; outline: 1px solid transparent; }
+.heat i.clickable:hover { outline-color: var(--accent); }
+.heat-day {
+  margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border);
+  font-size: 12px; color: var(--text);
+}
+.heat-day-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
+.heat-day-list { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+.heat-day-list li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.heat-day-note { margin: 6px 0 0; color: var(--muted); }
+.heat-day .muted { color: var(--muted); }
