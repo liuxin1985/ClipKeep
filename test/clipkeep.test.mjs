@@ -74,7 +74,7 @@ function makeBackend() {
     },
     contextMenus: {
       removeAll(cb) { menuOps.removeAll++; if (cb) cb(); },
-      create(opts) { menuOps.created.push(opts.id); },
+      create(opts) { menuOps.created.push(opts); },
       onClicked: { addListener(fn) { menuClickListeners.push(fn); } },
     },
     commands: { onCommand: { addListener(fn) { commandListeners.push(fn); } } },
@@ -87,7 +87,7 @@ function makeBackend() {
   };
 
   // 在沙箱里跑真实的 background.js，注册消息路由与命令监听
-  const ctx = vm.createContext({ chrome, console, setTimeout, Date, Math, JSON, String, Number, Array, Object, Promise });
+  const ctx = vm.createContext({ chrome, console, setTimeout, Date, Math, JSON, String, Number, Array, Object, Promise, URL });
   vm.runInContext(src("background.js"), ctx);
 
   const send = async (msg, from) => {
@@ -242,12 +242,12 @@ async function testConcurrency() {
   const be8 = makeBackend();
   eq("加载脚本时不建菜单", be8.menuOps.created.length, 0);
   await be8.fireInstalled("install");
-  eq("安装时建两个菜单项", be8.menuOps.created.length, 2);
+  eq("安装时建四个菜单项", be8.menuOps.created.length, 4);
   await be8.fireInstalled("update");
   eq("更新时先清空再重建", be8.menuOps.removeAll, 2);
-  eq("更新后菜单数量", be8.menuOps.created.length, 4);
+  eq("更新后菜单数量", be8.menuOps.created.length, 8);
   await be8.fireInstalled("chrome_update");
-  eq("浏览器升级不重复建菜单", be8.menuOps.created.length, 4);
+  eq("浏览器升级不重复建菜单", be8.menuOps.created.length, 8);
 }
 
 /* ---------------- 1b. 快捷键链路 ---------------- */
@@ -1678,6 +1678,270 @@ async function testExportTemplate() {
   }
 }
 
+/* ---------------- 10. 图片与链接剪藏 ---------------- */
+
+async function testMediaClips() {
+  console.log("\n[10] 右键剪藏图片 / 链接：菜单注册 / 协议白名单 / 渲染 / 导出");
+  const now = Date.now();
+  const IMG = "https://cdn.example.com/img/cat.png";
+  const LINK = "https://docs.example.com/guide?x=1";
+
+  /* 1. 菜单注册：图片和链接各自只在自己的上下文出现 */
+  {
+    const be = makeBackend();
+    await be.fireInstalled("install");
+    const image = be.menuOps.created.find((c) => c.id === "clipkeep-save-image");
+    const link = be.menuOps.created.find((c) => c.id === "clipkeep-save-link");
+    ok("注册了「收藏图片」菜单项", !!image, JSON.stringify(be.menuOps.created));
+    ok("图片菜单只在图片上出现", !!image && JSON.stringify(image.contexts) === '["image"]');
+    ok("注册了「收藏链接」菜单项", !!link, JSON.stringify(be.menuOps.created));
+    ok("链接菜单只在链接上出现", !!link && JSON.stringify(link.contexts) === '["link"]');
+  }
+
+  /* 2. 右键图片：地址入 image，正文用文件名兜底，来源页留在 url */
+  {
+    const be = makeBackend();
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-image", srcUrl: IMG, pageUrl: "https://blog.example.com/p/1", mediaType: "image" },
+      { id: 1, title: "博文一", url: "https://blog.example.com/p/1" }
+    );
+    eq("图片剪藏入库一条", be.store.clipkeep_items.length, 1);
+    const it = be.store.clipkeep_items[0] || {};
+    eq("类型记作图片", it.kind, "image");
+    eq("图片地址入库", it.image, IMG);
+    eq("正文用文件名兜底", it.text, "cat.png");
+    eq("来源页入库", it.url, "https://blog.example.com/p/1");
+    eq("来源标题入库", it.title, "博文一");
+    ok("剪藏成功有页面反馈", /已收藏/.test(be.sentToTab.map((s) => s.msg.message).join("|")));
+    eq("菜单处理不抛异常", be.menuErrors.length, 0);
+  }
+  {
+    const be = makeBackend();
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-image", srcUrl: "https://cdn.example.com/img/cat.png?w=800&h=600#x", pageUrl: "https://blog/p" },
+      { id: 1, title: "T", url: "https://blog/p" }
+    );
+    eq("文件名去掉查询串与锚点", (be.store.clipkeep_items[0] || {}).text, "cat.png");
+  }
+
+  /* 3. 右键链接：有链接文字用文字，没有就用目标站点兜底 */
+  {
+    const be = makeBackend();
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-link", linkUrl: LINK, selectionText: "官方指南", pageUrl: "https://blog.example.com/p/1" },
+      { id: 1, title: "博文一", url: "https://blog.example.com/p/1" }
+    );
+    const it = be.store.clipkeep_items[0] || {};
+    eq("类型记作链接", it.kind, "link");
+    eq("链接地址入库", it.link, LINK);
+    eq("正文取链接文字", it.text, "官方指南");
+    eq("来源页是链接所在页", it.url, "https://blog.example.com/p/1");
+  }
+  {
+    const be = makeBackend();
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-link", linkUrl: LINK, pageUrl: "https://blog/p" },
+      { id: 1, title: "T", url: "https://blog/p" }
+    );
+    const it = be.store.clipkeep_items[0] || {};
+    ok("没有链接文字时用目标地址兜底正文", /docs\.example\.com/.test(it.text || ""), JSON.stringify(it));
+  }
+
+  /* 4. 伪协议 / data: 地址不是可剪藏的内容，也不能冒充成图片链接 */
+  {
+    const be = makeBackend();
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-image", srcUrl: "javascript:alert(1)", pageUrl: "https://blog/p" },
+      { id: 1, title: "T", url: "https://blog/p" }
+    );
+    const it = be.store.clipkeep_items[0] || {};
+    ok("伪协议图片地址不入库", !it.image, JSON.stringify(it));
+    ok("伪协议不让条目冒充图片", it.kind !== "image", JSON.stringify(it));
+    ok("伪协议地址不写进收藏", be.store.clipkeep_items.length === 0, JSON.stringify(be.store.clipkeep_items));
+    ok("伪协议剪藏给出说明", /无法收藏/.test(be.sentToTab.map((s) => s.msg.message).join("|")));
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save-link", linkUrl: "data:text/html,<script>alert(1)</script>", pageUrl: "https://blog/p" },
+      { id: 1, title: "T", url: "https://blog/p" }
+    );
+    const l = be.store.clipkeep_items[0] || {};
+    ok("data: 链接地址不入库", !l.link, JSON.stringify(l));
+    ok("data: 链接降级为普通收藏", l.kind !== "link", JSON.stringify(l));
+    eq("data: 链接不写入收藏", be.store.clipkeep_items.length, 0);
+  }
+
+  /* 5. 重复剪藏同一个目标：沿用重复检测，不堆副本 */
+  {
+    const be = makeBackend();
+    const info = { menuItemId: "clipkeep-save-image", srcUrl: IMG, pageUrl: "https://blog/p" };
+    await be.fireMenuClick(info, { id: 1, title: "T", url: "https://blog/p" });
+    await be.fireMenuClick(info, { id: 1, title: "T", url: "https://blog/p" });
+    eq("同一张图只存一条", be.store.clipkeep_items.length, 1);
+    ok("重复剪藏有提示", /已经在收藏里/.test(be.sentToTab.map((s) => s.msg.message).join("|")));
+  }
+
+  /* 6. 备份通道同样要洗：类型夹到合法值，非法地址丢弃 */
+  {
+    const be = makeBackend();
+    const res = await be.send({
+      type: "clipkeep:replace",
+      payload: {
+        items: [
+          { id: "m1", text: "cat.png", kind: "image", image: IMG, url: "https://blog/p", createdAt: 1 },
+          { id: "m2", text: "官方指南", kind: "link", link: LINK, url: "https://blog/p", createdAt: 2 },
+          { id: "m3", text: "伪造类型", kind: "picture", image: "javascript:alert(1)", createdAt: 3 },
+          { id: "m4", text: "空壳图片", kind: "image", image: "javascript:alert(1)", createdAt: 4 },
+        ],
+      },
+    });
+    ok("replace 接受带媒体字段的备份", res.ok === true, JSON.stringify(res));
+    const by = (id) => be.store.clipkeep_items.find((x) => x.id === id);
+    eq("备份里的图片类型保留", by("m1").kind, "image");
+    eq("备份里的图片地址保留", by("m1").image, IMG);
+    eq("备份里的链接地址保留", by("m2").link, LINK);
+    eq("非法类型回落普通收藏", by("m3").kind, undefined);
+    ok("非法图片地址被丢弃", !by("m3").image, JSON.stringify(by("m3")));
+    ok("图片地址非法时不再冒充图片", by("m4").kind === undefined && !by("m4").image, JSON.stringify(by("m4")));
+  }
+
+  /* 6b. 备份 → 恢复：媒体字段不能在半路被丢掉 */
+  {
+    const p = await mountPopup({ clipkeep_items: [] });
+    await p.putBackup({
+      app: "ClipKeep",
+      version: 1,
+      items: [
+        { id: "b1", text: "cat.png", kind: "image", image: IMG, url: "https://blog/p", createdAt: now },
+        { id: "b2", text: "官方指南", kind: "link", link: LINK, url: "https://blog/p", createdAt: now },
+        { id: "b3", text: "伪造", kind: "image", image: "javascript:alert(1)", createdAt: now },
+      ],
+      highlights: [],
+    });
+    await p.click(p.$("modal-ok"));
+    await tick(30);
+    const b1 = p.store.clipkeep_items.find((x) => x.id === "b1") || {};
+    const b2 = p.store.clipkeep_items.find((x) => x.id === "b2") || {};
+    const b3 = p.store.clipkeep_items.find((x) => x.id === "b3") || {};
+    eq("恢复后图片地址还在", b1.image, IMG);
+    eq("恢复后图片类型还在", b1.kind, "image");
+    eq("恢复后链接地址还在", b2.link, LINK);
+    ok("恢复时非法图片地址仍被拦下", !b3.image, JSON.stringify(b3));
+    ok("恢复后图片收藏渲染成图片", /图片/.test(p.qa(".item")[0].textContent), p.qa(".item")[0].innerHTML.slice(0, 200));
+  }
+
+  /* 7. 弹窗渲染：类型徽标 + 可点开的安全地址，且不远程加载图片 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        { id: "m1", text: "cat.png", note: "", tags: [], url: "https://blog/p", title: "博文", createdAt: now, kind: "image", image: IMG },
+        { id: "m2", text: "官方指南", note: "", tags: [], url: "https://blog/p", title: "博文", createdAt: now - 1, kind: "link", link: LINK },
+        { id: "m3", text: "伪造来源", note: "", tags: [], url: "javascript:alert(1)", title: "", createdAt: now - 2, kind: "image", image: "javascript:alert(1)" },
+        { id: "m4", text: "普通文字收藏", note: "", tags: [], url: "", title: "", createdAt: now - 3 },
+      ],
+    });
+    const rows = p.qa(".item");
+    eq("列表按时间倒序渲染", rows.length, 4);
+    ok("图片收藏带类型徽标", /图片/.test(rows[0].innerHTML), rows[0].innerHTML.slice(0, 200));
+    eq("图片收藏可点开原图地址", rows[0].querySelector("a.item-kind")?.getAttribute("href"), IMG);
+    ok("链接收藏带类型徽标", /链接/.test(rows[1].innerHTML), rows[1].innerHTML.slice(0, 200));
+    eq("链接收藏渲染目标地址", rows[1].querySelector("a.item-kind")?.getAttribute("href"), LINK);
+    ok("普通收藏不渲染类型徽标", !rows[3].querySelector(".item-kind"), rows[3].innerHTML.slice(0, 200));
+    ok("非法地址不渲染成链接", !rows[2].querySelector('a[href^="javascript"]'), rows[2].innerHTML.slice(0, 240));
+    ok("弹窗不远程加载图片（离线且不暴露浏览记录）", p.qa(".item img").length === 0);
+    ok("非法地址不写进任何链接属性",
+       p.qa(".item a").every((a) => !/javascript:/.test(a.getAttribute("href") || "")),
+       p.qa(".item a").map((a) => a.getAttribute("href")).join("|"));
+    ok("伪协议来源仍以纯文本露出，不假装能点", /javascript:/.test(rows[2].textContent), rows[2].textContent.slice(0, 120));
+
+    p.$("search").value = "cdn.example.com";
+    await p.fire(p.$("search"), "input");
+    eq("搜图片地址能命中图片收藏", p.qa(".item").length, 1);
+    p.$("search").value = "docs.example.com";
+    await p.fire(p.$("search"), "input");
+    eq("搜链接地址能命中链接收藏", p.qa(".item").length, 1);
+    p.$("search").value = "";
+    await p.fire(p.$("search"), "input");
+
+    let copied = "";
+    p.w.HTMLTextAreaElement.prototype.select = function () { copied = this.value; };
+    const firstRow = p.qa(".item")[0]; // 搜索过后列表重渲染过，取当前行而不是旧引用
+    eq("当前第一行还是图片收藏", firstRow.dataset.id, "m1");
+    await p.click(firstRow.querySelector('[data-act="copy"]'));
+    eq("图片收藏复制的是图片地址", copied, IMG);
+    await p.click(p.qa(".item")[1].querySelector('[data-act="copy"]'));
+    eq("链接收藏复制的是链接地址", copied, LINK);
+    await p.click(p.qa(".item")[2].querySelector('[data-act="copy"]'));
+    eq("地址非法时退回复制正文", copied, "伪造来源");
+  }
+
+  /* 8. Markdown 导出：图片写成 ![]()，链接写成 []()，关掉来源开关也不丢内容 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        { id: "m1", text: "cat.png", note: "", tags: [], url: "https://blog/p", title: "博文", createdAt: now, kind: "image", image: IMG },
+        { id: "m2", text: "官方指南", note: "", tags: [], url: "https://blog/p", title: "博文", createdAt: now - 1, kind: "link", link: LINK },
+        { id: "m3", text: "伪造来源", note: "", tags: [], url: "javascript:alert(1)", title: "", createdAt: now - 2, kind: "image", image: "javascript:alert(1)" },
+      ],
+    });
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    const md = p.getDownloaded() || "";
+    ok("图片导出为 Markdown 图片", md.includes(`![cat.png](<${IMG}>)`), md.slice(0, 400));
+    ok("链接导出为 Markdown 链接", md.includes(`[官方指南](<${LINK}>)`), md.slice(0, 400));
+    ok("伪协议地址不写成 Markdown 链接", !/\]\(<javascript:/.test(md), md.slice(0, 400));
+    ok("图片收藏正文仍在", md.includes("> cat.png"), md.slice(0, 400));
+
+    p.$("set-source").checked = false;
+    await p.fire(p.$("set-source"), "change");
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    const noSrc = p.getDownloaded() || "";
+    ok("关掉来源开关不丢图片地址", noSrc.includes(`![cat.png](<${IMG}>)`), noSrc.slice(0, 400));
+    ok("关掉来源开关不丢链接地址", noSrc.includes(`[官方指南](<${LINK}>)`), noSrc.slice(0, 400));
+    ok("关掉来源开关后不输出来源行", !/\[来源\]|来源：/.test(noSrc), noSrc.slice(0, 400));
+  }
+  {
+    /* 回归：纯文字收藏的导出形状不受影响 */
+    const p = await mountPopup({
+      clipkeep_items: [{ id: "t1", text: "退相干时间是主要工程难点", note: "", tags: [], url: "https://blog/p", title: "博文", createdAt: now }],
+    });
+    await p.click(p.$("btn-export"));
+    await tick(20);
+    const md = p.getDownloaded() || "";
+    ok("文字收藏不产生图片语法", !/!\[/.test(md), md.slice(0, 300));
+    eq("文字收藏只输出来源一条链接",
+       md.split("\n").filter((l) => /^\[.+\]\(/.test(l)).length, 1);
+    ok("文字收藏导出正文与来源", md.includes("> 退相干时间是主要工程难点") && md.includes(`[来源](<https://blog/p>)`), md.slice(0, 300));
+  }
+  /* 9. 改收藏不能塞进非法类型或伪协议地址 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [{ id: "u1", text: "普通收藏", note: "", tags: [], url: "", title: "", createdAt: now }];
+    const bad = await be.send({ type: "clipkeep:update", id: "u1", patch: { kind: "image", image: "javascript:alert(1)" } });
+    ok("update 拒绝非法媒体地址", bad.ok === true, JSON.stringify(bad));
+    ok("非法类型没被写进存储", !be.store.clipkeep_items[0].kind, JSON.stringify(be.store.clipkeep_items[0]));
+    ok("非法地址没被写进存储", !be.store.clipkeep_items[0].image, JSON.stringify(be.store.clipkeep_items[0]));
+    const good = await be.send({ type: "clipkeep:update", id: "u1", patch: { kind: "link", link: LINK } });
+    eq("合法类型可以改", good.item.kind, "link");
+    eq("合法地址可以改", good.item.link, LINK);
+    const demote = await be.send({ type: "clipkeep:update", id: "u1", patch: { kind: "text" } });
+    ok("改回文字收藏会清掉地址", !demote.item.kind && !demote.item.link, JSON.stringify(demote.item));
+  }
+  /* 10. 回顾卡片：媒体收藏要认出类型，来源地址同样只认协议白名单 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        { id: "r1", text: "cat.png", note: "", tags: [], kind: "image", image: IMG, url: "javascript:alert(1)", title: "", createdAt: now - 1, review: { box: 0, due: now - 10, seen: 0 } },
+      ],
+    });
+    await p.click(p.qa(".tab").find((t) => t.dataset.view === "review"));
+    ok("回顾卡片标出图片类型", /图片/.test(p.$("review").textContent), p.$("review").innerHTML.slice(0, 240));
+    eq("回顾卡片能打开图片地址", p.$("review").querySelector("a.item-kind")?.getAttribute("href"), IMG);
+    ok("回顾卡片里的伪协议来源不可点", !p.$("review").querySelector('a[href^="javascript"]'),
+      p.$("review").innerHTML.slice(0, 300));
+    ok("伪协议来源仍以文字说明，不假装能点", /javascript:/.test(p.$("review").textContent));
+  }
+}
+
 /* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
@@ -1751,7 +2015,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testManifests];
   for (const s of suites) {
     try {
       await s();

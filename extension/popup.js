@@ -103,6 +103,23 @@
     return /^(https?:|file:)/i.test(String(url || "")) ? String(url) : "";
   }
 
+  /**
+   * 图片 / 链接收藏的目标地址：只认 http(s)。
+   * 与后台的 mediaOf 同一套规则，列表里显示的才等于存下来的。
+   */
+  function mediaOf(it) {
+    if (!it || (it.kind !== "image" && it.kind !== "link")) return "";
+    const url = String((it.kind === "image" ? it.image : it.link) || "");
+    return /^https?:\/\//i.test(url) ? url : "";
+  }
+
+  /** 列表里显示的可读标签 */
+  function mediaLabel(it) {
+    const url = mediaOf(it);
+    if (!url) return "";
+    return it.kind === "image" ? "查看原图" : hostname(url);
+  }
+
   /* ---------- 复习调度（Leitner 盒） ---------- */
 
   function reviewPrefs() {
@@ -258,6 +275,7 @@
         (it.text || "").toLowerCase().includes(q) ||
         (it.note || "").toLowerCase().includes(q) ||
         (it.title || "").toLowerCase().includes(q) ||
+        mediaOf(it).toLowerCase().includes(q) ||
         (it.tags || []).some((t) => t.toLowerCase().includes(q))
       );
     });
@@ -331,12 +349,21 @@
     const trunc = it.truncated
       ? `<span class="badge-warn" title="内容超过 ${MAX_TEXT} 字，仅保存了前半部分">已截断</span>`
       : "";
+    // 图片 / 链接收藏：显示类型徽标 + 可点开的目标地址（不在扩展页里远程加载图）
+    const media = mediaOf(it);
+    const isMedia = it.kind === "image" || it.kind === "link";
+    const kindBadge = isMedia
+      ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>`
+      : "";
+    const mediaLink = media
+      ? `<a class="item-kind" href="${esc(media)}" target="_blank" rel="noopener" title="${esc(media)}">${esc(hostname(media))}</a>`
+      : "";
     const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
     return `
       <div class="item" data-id="${esc(it.id)}">
         <div class="item-text${longClip ? " is-clamped" : ""}">${hit(text, q)}</div>
         ${note}
-        <div class="item-meta">${trunc}${tags}${link}<span>${fmtDate(it.createdAt)}</span></div>
+        <div class="item-meta">${trunc}${kindBadge}${tags}${mediaLink}${link}<span>${fmtDate(it.createdAt)}</span></div>
         <div class="item-actions">
           <button class="mini-btn" data-act="copy">复制</button>
           <button class="mini-btn" data-act="tag">加标签</button>
@@ -654,7 +681,18 @@
     const it = queued[0];
     const r = ensureReview(it);
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
-    const link = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title || hostname(it.url))}</a>` : "";
+    // 来源与目标地址都要过协议白名单：收藏列表洗过了，回顾卡片也得洗
+    const src = linkable(it.url);
+    const link = it.url
+      ? src
+        ? `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(it.title || hostname(src))}</a>`
+        : `<span class="item-src" title="来源不是可点击的地址">${esc(it.title || it.url)}</span>`
+      : "";
+    const media = mediaOf(it);
+    const kindTag = media
+      ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>` +
+        `<a class="item-kind" href="${esc(media)}" target="_blank" rel="noopener" title="${esc(media)}">${esc(hostname(media))}</a>`
+      : "";
     const capNote = due.length > queued.length ? ` · 今日上限 ${cap} 条，剩余 ${due.length - queued.length} 条明天继续` : "";
     reviewEl.innerHTML = heat + `
       <div class="rev-progress">本组待回顾 ${queued.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}${capNote}</div>
@@ -662,7 +700,7 @@
         <div class="rev-front">${esc(it.text)}</div>
         <div class="rev-back" hidden>
           ${it.note ? `<div class="rev-note">${esc(it.note)}</div>` : ""}
-          <div class="rev-meta">${tags}${link}</div>
+          <div class="rev-meta">${kindTag}${tags}${link}</div>
         </div>
         <button class="rev-reveal" data-act="reveal">显示答案</button>
         <div class="rev-grade" hidden>
@@ -715,7 +753,7 @@
     const it = items.find((x) => x.id === id);
     if (!it) return;
     const act = btn.dataset.act;
-    if (act === "copy") copyText(it.text);
+    if (act === "copy") copyText(mediaOf(it) || it.text);
     else if (act === "del") {
       // 提示要跟着真实结果走：后台没写成功就不能报「已删除」
       const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
@@ -810,6 +848,13 @@
     arr.forEach((it, i) => {
       lines.push(`## ${headingOf(it, i, tpl.heading)}`);
       if (it.tags && it.tags.length) lines.push("", "`" + it.tags.map((t) => "#" + t).join(" ") + "`");
+      const media = mediaOf(it);
+      if (media) {
+        // 尖括号目的地同来源行：地址里的括号不会把 Markdown 链接写断
+        const label = String(it.text || "").replace(/[[\]\n\r]/g, " ").trim() || hostname(media);
+        const dest = media.replace(/[<>\n\r]/g, " ");
+        lines.push("", it.kind === "image" ? `![${label}](<${dest}>)` : `[${label}](<${dest}>)`);
+      }
       lines.push("", "> " + String(it.text).replace(/\n/g, "\n> "));
       if (it.note) lines.push("", "**备注：** " + it.note);
       if (it.url && tpl.source) {
@@ -870,6 +915,7 @@
   function normalizeItem(it) {
     if (!it || typeof it !== "object" || !it.text) return null;
     const rawId = String(it.id === undefined || it.id === null ? "" : it.id);
+    const media = mediaOf(it); // 图片 / 链接收藏的类型与地址，非法值在这里就丢掉
     return {
       id: SAFE_ID.test(rawId) ? rawId : genId(),
       text: String(it.text),
@@ -879,6 +925,7 @@
       title: String(it.title || ""),
       createdAt: Number(it.createdAt) || Date.now(),
       review: normalizeReview(it.review),
+      ...(media ? { kind: it.kind, [it.kind === "image" ? "image" : "link"]: media } : {}),
     };
   }
 

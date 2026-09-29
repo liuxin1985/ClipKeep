@@ -19,6 +19,9 @@ const ACTIVITY_DAYS = 120; // 活动记录只留最近 120 天
 const INTERVALS = 6; // 记忆盒数量，用于把外部数据的盒号夹到合法区间
 const HL_COLORS = ["yellow", "green", "pink", "blue"];
 const SAFE_ID = /^[\w-]{1,64}$/; // 外部数据的 id 只允许安全字符，避免拼进 HTML 时越出属性
+const MEDIA_KINDS = ["image", "link"]; // 除文字外的剪藏类型；文字收藏不写 kind
+const MEDIA_MAX = 2048; // 图片 / 链接地址长度上限
+const HTTP_ONLY = /^https?:\/\//i; // 可剪藏的地址：javascript: / data: 一律不收
 
 /* ---------------- 存储读写 ---------------- */
 
@@ -112,6 +115,39 @@ function normalizeTags(tags) {
   return [...new Set(arr.map((t) => String(t).trim()).filter(Boolean))].slice(0, 12);
 }
 
+/**
+ * 图片 / 链接收藏的目标地址。
+ * 类型和地址要配对：kind 说自己是图片，地址却非法，就当普通文字收藏，
+ * 否则列表里会出现一张点开没反应的「图片」。
+ */
+function mediaOf(raw) {
+  if (!raw || MEDIA_KINDS.indexOf(raw.kind) < 0) return {};
+  const url = String(raw.kind === "image" ? raw.image || "" : raw.link || "").trim().slice(0, MEDIA_MAX);
+  if (!HTTP_ONLY.test(url)) return {};
+  return raw.kind === "image" ? { kind: "image", image: url } : { kind: "link", link: url };
+}
+
+/** 图片地址的可读标签：文件名（去掉查询串与锚点），退化到站点名 */
+function imageLabel(url) {
+  try {
+    const u = new URL(url);
+    const last = decodeURIComponent((u.pathname.split("/").filter(Boolean).pop() || "").trim());
+    return (last || u.hostname).slice(0, 120);
+  } catch (_) {
+    return String(url).slice(0, 120);
+  }
+}
+
+/** 链接没有可选文字时的标签：站点名 + 路径，比整条 URL 短且认得出是什么 */
+function linkLabel(url) {
+  try {
+    const u = new URL(url);
+    return (u.hostname + (u.pathname === "/" ? "" : u.pathname)).slice(0, 120) || String(url).slice(0, 120);
+  } catch (_) {
+    return String(url).slice(0, 120);
+  }
+}
+
 /** 排期：盒号夹到合法区间，时间戳非法时视为立即到期 */
 function cleanReview(r) {
   if (!r || typeof r !== "object") return undefined;
@@ -138,6 +174,7 @@ function cleanItem(raw) {
     url: String(raw.url || ""),
     title: String(raw.title || ""),
     createdAt: Number(raw.createdAt) || Date.now(),
+    ...mediaOf(raw),
   };
   if (item.text.length > MAX_TEXT) item.truncated = true;
   const review = cleanReview(raw.review);
@@ -145,12 +182,15 @@ function cleanItem(raw) {
   return item;
 }
 
-/** 同一条内容是否已经存过：来源、正文、备注、标签全同才算重复 */
+/** 同一条内容是否已经存过：类型、地址、来源、正文、备注、标签全同才算重复 */
 function sameAs(a, b) {
   return (
     (a.url || "") === (b.url || "") &&
     a.text === b.text &&
     (a.note || "") === (b.note || "") &&
+    (a.kind || "") === (b.kind || "") &&
+    (a.image || "") === (b.image || "") &&
+    (a.link || "") === (b.link || "") &&
     (a.tags || []).join("\n") === (b.tags || []).join("\n")
   );
 }
@@ -166,6 +206,7 @@ function addItem(payload) {
     url: (payload && payload.url) || "",
     title: (payload && payload.title) || "",
     createdAt: Date.now(),
+    ...mediaOf(payload || {}),
   };
   if (raw.length > MAX_TEXT) item.truncated = true;
   return mutate((items) => {
@@ -194,12 +235,21 @@ function updateItem(id, patch) {
     if (idx === -1) return { result: { ok: false, error: "not_found" } };
     const p = { ...(patch || {}) }; // 不改调用方传进来的对象
     if (p.tags !== undefined) p.tags = normalizeTags(p.tags);
+    // 类型与地址要配对校验：改一条收藏不能塞进 javascript: 地址，
+    // 也不能只写 kind:"text" 就把原来的图片地址留在身上
+    const touchMedia = p.kind !== undefined || p.image !== undefined || p.link !== undefined;
+    const media = touchMedia ? mediaOf(p) : null;
+    if (touchMedia) { delete p.kind; delete p.image; delete p.link; }
     if (p.text !== undefined) {
       const t = String(p.text).trim();
       if (!t) return { result: { ok: false, error: "empty" } };
       p.text = t.slice(0, MAX_TEXT);
     }
     items[idx] = { ...items[idx], ...p, id };
+    if (touchMedia) {
+      delete items[idx].kind; delete items[idx].image; delete items[idx].link;
+      Object.assign(items[idx], media);
+    }
     return { write: true, items, result: { ok: true, item: items[idx] } };
   });
 }
@@ -431,6 +481,16 @@ function buildMenus() {
       contexts: ["selection"],
     });
     API.contextMenus.create({
+      id: "clipkeep-save-image",
+      title: "ClipKeep：收藏这张图片",
+      contexts: ["image"],
+    });
+    API.contextMenus.create({
+      id: "clipkeep-save-link",
+      title: "ClipKeep：收藏这个链接",
+      contexts: ["link"],
+    });
+    API.contextMenus.create({
       id: "clipkeep-reader",
       title: "ClipKeep：净化阅读本页",
       contexts: ["page"],
@@ -455,23 +515,44 @@ function saveFailMessage(err) {
   return "保存失败，请刷新页面后重试";
 }
 
+/** 把一次收藏请求落盘，并把结果作为 toast 回给页面 */
+async function saveClip(tab, payload) {
+  try {
+    const res = await addItem(payload);
+    notifyTab(tab.id, {
+      type: "clipkeep:toast",
+      message: res.ok
+        ? res.dup ? "这条已经在收藏里了" : "已收藏 ✓"
+        : res.error === "empty" ? "内容为空" : saveFailMessage(res),
+    });
+  } catch (err) {
+    notifyTab(tab.id, { type: "clipkeep:toast", message: saveFailMessage(err) });
+  }
+}
+
 if (API.contextMenus && API.contextMenus.onClicked) {
   API.contextMenus.onClicked.addListener(async (info, tab) => {
     if (!tab || tab.id === undefined) return;
     if (info.menuItemId === "clipkeep-save") {
       const text = (info.selectionText || "").trim();
       if (!text) return; // 空选区不打扰
-      try {
-        const res = await addItem({ text, url: info.pageUrl || tab.url || "", title: tab.title || "" });
-        notifyTab(tab.id, {
-          type: "clipkeep:toast",
-          message: res.ok
-            ? res.dup ? "这条已经在收藏里了" : "已收藏 ✓"
-            : res.error === "empty" ? "内容为空" : saveFailMessage(res),
-        });
-      } catch (err) {
-        notifyTab(tab.id, { type: "clipkeep:toast", message: saveFailMessage(err) });
+      await saveClip(tab, { text, url: info.pageUrl || tab.url || "", title: tab.title || "" });
+    } else if (info.menuItemId === "clipkeep-save-image" || info.menuItemId === "clipkeep-save-link") {
+      const isImage = info.menuItemId === "clipkeep-save-image";
+      const url = isImage ? info.srcUrl : info.linkUrl;
+      // 地址要在入库前判协议：伪协议在菜单里点得到，但绝不能变成可点的链接
+      if (!HTTP_ONLY.test(String(url || ""))) {
+        notifyTab(tab.id, { type: "clipkeep:toast", message: "这个地址不是网页链接，无法收藏" });
+        return;
       }
+      const label = isImage ? imageLabel(url) : (info.selectionText || "").trim() || linkLabel(url);
+      await saveClip(tab, {
+        kind: isImage ? "image" : "link",
+        [isImage ? "image" : "link"]: url,
+        text: label || "未命名",
+        url: info.pageUrl || tab.url || "",
+        title: tab.title || "",
+      });
     } else if (info.menuItemId === "clipkeep-reader") {
       runReader(tab);
     }
