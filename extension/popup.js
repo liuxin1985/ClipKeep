@@ -379,6 +379,13 @@
   /* ---------- 高亮 / 批注视图 ---------- */
 
   const COLOR_HEX = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
+  const COLOR_NAMES = { yellow: "黄色", green: "绿色", pink: "粉色", blue: "蓝色" };
+
+  /** 换色按固定顺序轮转；库里颜色不合法时从黄色重新开始 */
+  function nextHlColor(cur) {
+    const i = HL_COLORS.indexOf(cur);
+    return HL_COLORS[(i + 1) % HL_COLORS.length];
+  }
 
   function hlFiltered() {
     const q = searchEl.value.trim().toLowerCase();
@@ -412,7 +419,9 @@
 
   function hlNode(h, q) {
     const note = h.note ? `<div class="hl-note">✎ ${hit(h.note, q)}</div>` : "";
-    const bg = COLOR_HEX[h.color] || COLOR_HEX.yellow;
+    const key = COLOR_HEX[h.color] ? h.color : "yellow";
+    const bg = COLOR_HEX[key];
+    const next = COLOR_NAMES[nextHlColor(h.color)] || "黄色";
     return `
       <div class="hl-item" data-hlid="${esc(h.id)}">
         <span class="hl-swatch" style="background:${bg}"></span>
@@ -423,6 +432,7 @@
         </div>
         <div class="hl-actions">
           <button class="mini-btn" data-act="hl-copy">复制</button>
+          <button class="mini-btn" data-act="hl-color" title="当前${COLOR_NAMES[key]}，点击换成${next}">换色</button>
           <button class="mini-btn danger" data-act="hl-del">删除</button>
         </div>
       </div>`;
@@ -488,7 +498,13 @@
     if (!h) return;
     const act = btn.dataset.act;
     if (act === "hl-copy") copyText(h.text);
-    else if (act === "hl-del") {
+    else if (act === "hl-color") {
+      // 换色也走后台：那里有颜色白名单，且整条写链保证不抹掉别处的改动
+      const res = await API.runtime.sendMessage({ type: "clipkeep:hl-update", id, patch: { color: nextHlColor(h.color) } });
+      if (!res || !res.ok) return toast("换色失败，请重试");
+      await load();
+      toast("已换色");
+    } else if (act === "hl-del") {
       // 走后台：进回收站 + 串行写，避免整表覆盖抹掉别处新增的高亮
       const res = await API.runtime.sendMessage({ type: "clipkeep:hl-delete", id });
       if (!res || !res.ok) return toast("删除失败，请重试");

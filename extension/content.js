@@ -11,8 +11,10 @@
   const NS = "clipkeep";
   const HL_KEY = "clipkeep_highlights";
   const COLORS = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
+  const COLOR_NAMES = { yellow: "黄色", green: "绿色", pink: "粉色", blue: "蓝色" };
 
   let toolbar = null;
+  let hlColor = "yellow"; // 工具条上当前选中的高亮色（页面级，刷新回到默认黄）
   let card = null;
   let toastTimer = null;
   let readerRoot = null;
@@ -109,6 +111,24 @@
 
   /* ---------- 浮动工具条 ---------- */
 
+  /* 色块不是 .clipkeep-btn：它们是「选颜色」，和四个动作按钮不是一类东西 */
+  function swatchHtml() {
+    return Object.keys(COLORS)
+      .map(
+        (k) =>
+          `<button class="${NS}-swatch${k === hlColor ? " active" : ""}" type="button" data-color="${k}"` +
+          ` style="background:${COLORS[k]}" title="以${COLOR_NAMES[k] || k}高亮"></button>`
+      )
+      .join("");
+  }
+
+  function markActiveSwatch() {
+    if (!toolbar) return;
+    toolbar.querySelectorAll("." + NS + "-swatch").forEach((b) => {
+      b.classList.toggle("active", b.dataset.color === hlColor);
+    });
+  }
+
   function ensureToolbar() {
     if (toolbar) return toolbar;
     toolbar = document.createElement("div");
@@ -116,9 +136,10 @@
     toolbar.className = NS + "-toolbar";
     toolbar.innerHTML = `
       <button class="${NS}-btn ${NS}-btn-save" type="button">★ 收藏</button>
-      <button class="${NS}-btn ${NS}-btn-hl" type="button" title="高亮">🖍</button>
+      <button class="${NS}-btn ${NS}-btn-hl" type="button" title="用当前颜色高亮">🖍</button>
       <button class="${NS}-btn ${NS}-btn-note" type="button" title="批注">✎</button>
       <button class="${NS}-btn ${NS}-btn-read" type="button">阅读</button>
+      <span class="${NS}-swatches">${swatchHtml()}</span>
     `;
     toolbar.addEventListener("mousedown", (e) => e.preventDefault());
     toolbar.querySelector("." + NS + "-btn-save").addEventListener("click", () => {
@@ -129,7 +150,18 @@
     toolbar.querySelector("." + NS + "-btn-hl").addEventListener("click", () => {
       const r = currentRange();
       hideToolbar();
-      createHighlight(r, "yellow", "");
+      createHighlight(r, hlColor, "");
+    });
+    toolbar.querySelectorAll("." + NS + "-swatch").forEach((b) => {
+      b.addEventListener("click", () => {
+        const key = COLORS[b.dataset.color] ? b.dataset.color : "yellow";
+        hlColor = key;
+        markActiveSwatch();
+        const r = currentRange();
+        hideToolbar();
+        // 有选区就顺手把这条涂上该色；没选区（比如刚高亮完）只记住颜色，下一步 🖍 用得上
+        if (r) createHighlight(r, key, "");
+      });
     });
     toolbar.querySelector("." + NS + "-btn-note").addEventListener("click", () => {
       const r = currentRange();

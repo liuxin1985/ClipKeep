@@ -27,6 +27,29 @@
   font-family: inherit;
 }
 .clipkeep-btn:hover { background: #e5e7eb; }
+
+/* 工具条上的高亮色块 */
+.clipkeep-swatches {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 6px;
+  margin-left: 2px;
+  border-left: 1px solid #e5e7eb;
+}
+.clipkeep-swatch {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 50%;
+}
+.clipkeep-swatch.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px #2563eb33;
+}
 .clipkeep-btn-save,
 .clipkeep-btn-confirm { background: #2563eb; color: #fff; }
 .clipkeep-btn-save:hover,

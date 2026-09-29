@@ -2113,6 +2113,122 @@ async function testV16Audit() {
   }
 }
 
+/* ---------------- 3n. v1.6 高亮颜色选择器 ---------------- */
+
+/** 十六进制色 → jsdom 的 rgb() 写法，两边都能匹配上 */
+function colorRe(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return new RegExp(`${hex}|rgb\\(\\s*${r},\\s*${g},\\s*${b}\\s*\\)`, "i");
+}
+
+async function testColorPicker() {
+  console.log("\n[13] 高亮颜色选择器：工具条色块 / 总览换色 / 四处枚举一致");
+  const HEX = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
+  const KEYS = ["yellow", "green", "pink", "blue"];
+
+  /* 1. 页面上：工具条给出色块，点哪个色就是哪个色，并记住为当前色 */
+  {
+    const url = "http://localhost/color";
+    const c = mountContent(url, [], "<p>量子比特可以同时处于两种状态</p><p>退相干时间很短需要纠错码</p><p>纠错码用多个物理比特拼一个逻辑比特</p>");
+    await tick(20);
+    const selIn = async (idx, end) => {
+      const node = c.w.document.querySelectorAll("article p")[idx].firstChild;
+      const r = c.w.document.createRange();
+      r.setStart(node, 0);
+      r.setEnd(node, end);
+      const sel = c.w.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+      await tick(30);
+      return c.w.document.getElementById("clipkeep-toolbar");
+    };
+    const bar = await selIn(0, 6);
+    const sw = [...bar.querySelectorAll(".clipkeep-swatch")];
+    eq("工具条给出四个色块", sw.length, 4);
+    eq("色块顺序与后台白名单一致", sw.map((x) => x.dataset.color).join(","), KEYS.join(","));
+    const swBg = (k) => ((bar.querySelector(`.clipkeep-swatch[data-color="${k}"]`) || {}).style || {}).background || "";
+    ok("色块用上调色板", KEYS.every((k) => colorRe(HEX[k]).test(swBg(k))), KEYS.map(swBg).join("|"));
+    eq("色块不混进按钮计数", bar.querySelectorAll(".clipkeep-btn").length, 4);
+    const clickSw = async (b, k) => {
+      const el = b.querySelector(`.clipkeep-swatch[data-color="${k}"]`);
+      if (el) el.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+      await tick(30);
+    };
+    const activeColor = (b) => ((b.querySelector(".clipkeep-swatch.active") || {}).dataset || {}).color || "";
+    const hlColor = (i) => (c.store.clipkeep_highlights[i] || {}).color || "";
+    await clickSw(bar, "green");
+    eq("点色块即高亮一条", c.store.clipkeep_highlights.length, 1);
+    eq("高亮用点中的颜色", hlColor(0), "green");
+    const first = c.marks().find((m) => m.dataset.hlid === (c.store.clipkeep_highlights[0] || {}).id);
+    ok("页面上的标记是同一种颜色", !!first && colorRe(HEX.green).test(first.style.background));
+    eq("该色块标为当前色", activeColor(bar), "green");
+
+    // 再选一段，点原来的 🖍：应沿用当前色而不是写死黄色
+    const bar2 = await selIn(1, 5);
+    bar2.querySelector(".clipkeep-btn-hl").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("🖍 沿用当前色", hlColor(1), "green");
+    await clickSw(bar2, "blue");
+    eq("换色后当前色跟过去", activeColor(bar2), "blue");
+    const bar3 = await selIn(2, 4);
+    bar3.querySelector(".clipkeep-btn-hl").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(30);
+    eq("切到蓝色后 🖍 用蓝色", hlColor(2), "blue");
+  }
+
+  /* 2. 弹窗总览：换色按钮改当前高亮的颜色，只动颜色，且实时重绘 */
+  {
+    const seed = {
+      clipkeep_highlights: [
+        { id: "s1", url: "http://x/p", title: "页面", text: "一段高亮", note: "别丢", color: "yellow", createdAt: Date.now() },
+      ],
+    };
+    const p = await mountPopup(seed);
+    await p.click(p.q('.tab[data-view="marks"]'));
+    const row = () => p.q('.hl-item[data-hlid="s1"]');
+    const btn = () => p.q('.hl-item[data-hlid="s1"] [data-act="hl-color"]');
+    ok("总览给出换色按钮", !!btn());
+    ok("换色按钮说明当前色", /黄色/.test(btn().title || ""), btn() && btn().title);
+    ok("换色按钮预告下一个色", /绿色/.test(btn().title || ""), btn() && btn().title);
+    eq("初始色块是黄色", colorRe(HEX.yellow).test(row().querySelector(".hl-swatch").style.background), true);
+    for (const want of ["green", "pink", "blue", "yellow"]) {
+      await p.click(btn());
+      eq(`点一下换成 ${want}`, (p.store.clipkeep_highlights[0] || {}).color, want);
+      ok(`${want} 重绘出来`, colorRe(HEX[want]).test(row().querySelector(".hl-swatch").style.background),
+         row().querySelector(".hl-swatch").style.background);
+      eq("换色不碰批注", p.store.clipkeep_highlights[0].note, "别丢");
+      eq("换色不碰原文", p.store.clipkeep_highlights[0].text, "一段高亮");
+      eq("换色不新增条目", p.store.clipkeep_highlights.length, 1);
+    }
+    ok("换色后总览仍只有一条", p.qa(".hl-item").length === 1);
+    eq("标签计数没被换色打乱", p.$("mark-count").textContent, "1");
+  }
+
+  /* 3. 四处颜色枚举必须描述同一套颜色 */
+  {
+    const bg = (src("background.js").match(/const HL_COLORS = \[([^\]]*)\]/) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    const pv = (src("popup.js").match(/const HL_COLORS = \[([^\]]*)\]/) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    const hexOf = (code, name) => {
+      const body = (code.match(new RegExp(`const ${name} = \\{([^}]*)\\}`)) || [, ""])[1];
+      const out = {};
+      for (const m of body.matchAll(/(\w+)\s*:\s*"(#[0-9a-fA-F]{6})"/g)) out[m[1]] = m[2];
+      return out;
+    };
+    const contentHex = hexOf(src("content.js"), "COLORS");
+    const popupHex = hexOf(src("popup.js"), "COLOR_HEX");
+    eq("后台色表", bg.join(","), KEYS.join(","));
+    eq("弹窗色表与后台一致", pv.join(","), KEYS.join(","));
+    eq("页面色表与后台一致", Object.keys(contentHex).join(","), KEYS.join(","));
+    ok("页面与弹窗用同一批十六进制色", KEYS.every((k) => contentHex[k] === popupHex[k] && popupHex[k] === HEX[k]),
+       JSON.stringify({ contentHex, popupHex }));
+  }
+}
+
 /* ---------------- 4. 清单一致性 / 消息协议 / 发布物料 ---------------- */
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
@@ -2186,7 +2302,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testManifests];
   for (const s of suites) {
     try {
       await s();
