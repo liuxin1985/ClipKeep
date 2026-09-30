@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 用法问答 / 不确定是不是 bug
+    url: https://github.com/liuxin1985/ClipKeep/discussions
+    about: 数据存在哪、怎么换电脑、能不能同步——先问，别急着报 bug
+  - name: 🔒 安全问题（请别开公开 Issue）
+    url: https://github.com/liuxin1985/ClipKeep/security/policy
+    about: 涉及存储、备份导入、扩展权限的安全问题请走私密渠道报告
+  - name: 📖 安装与使用说明
+    url: https://github.com/liuxin1985/ClipKeep/blob/main/docs/INSTALL.md
+    about: Chrome / Edge 加载已解压扩展、Safari 转换打包的完整步骤

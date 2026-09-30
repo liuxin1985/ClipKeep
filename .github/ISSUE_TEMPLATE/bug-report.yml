@@ -1,0 +1,105 @@
+name: 🐞 报告问题 / Bug report
+description: 收藏丢了、划词没反应、回顾排期不对——能复现的问题都欢迎报上来
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢花时间反馈。ClipKeep 是纯本地扩展，**没有任何服务端日志**，
+        所以复现步骤和环境信息越具体，修得越快。
+
+  - type: input
+    id: browser
+    attributes:
+      label: 浏览器与版本
+      description: Chrome / Edge / Safari 都行，要带版本号（地址栏输入 `chrome://version` 可看）
+      placeholder: "Chrome 139.0.7258.139 (arm64)"
+    validations:
+      required: true
+      maxlength: 100
+
+  - type: input
+    id: version
+    attributes:
+      label: ClipKeep 版本
+      description: 扩展管理页 → ClipKeep → 「版本」；源码加载的填对应 tag
+      placeholder: "1.7.0"
+    validations:
+      required: true
+      maxlength: 40
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 出问题的功能面
+      multiple: true
+      options:
+        - 划词工具条 / 收藏
+        - 高亮与批注
+        - 弹窗列表（搜索 / 标签 / 批量操作）
+        - 每日回顾 / 热力图
+        - 回收站与撤销
+        - 导出 Markdown / JSON 备份恢复
+        - 净化阅读
+        - 右键菜单 / 快捷键
+        - 深色模式 / 界面样式
+        - 安装与加载（打包 / 清单）
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请写成「别人照着做就能重现」的步骤，而不是描述结论
+      value: |
+        1. 打开 …（可贴一个公开网址）
+        2. 划选 …
+        3. 点击 …
+        4. 看到 …
+    validations:
+      required: true
+      maxlength: 2000
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      description: 你认为应该发生什么
+    validations:
+      required: true
+      maxlength: 1000
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 发生了什么 / 报了什么提示；有截图或录屏直接拖进来
+    validations:
+      required: true
+      maxlength: 2000
+
+  - type: textarea
+    id: data
+    attributes:
+      label: 数据相关（可选，但很救命）
+      description: |
+        只在问题跟数据有关时填：收藏条数、是否从 JSON 备份恢复过、是否手动改过存储。
+        **不要贴备份文件内容**——里面是你自己的笔记，贴数量和来源就够。
+    validations:
+      required: false
+      maxlength: 1000
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过已有 Issue，没有重复
+          required: true
+        - label: 我确认在普通网页上复现（`chrome://`、扩展商店页不注入脚本，属正常限制）
+          required: true
+        - label: 我愿意在需要时补充录屏或更多信息
+          required: false

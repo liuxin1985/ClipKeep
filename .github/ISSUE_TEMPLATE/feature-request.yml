@@ -1,0 +1,82 @@
+name: ✨ 功能建议 / Feature request
+description: 想要什么能力？顺手说清「没有它你现在怎么办」，比只写功能名有用得多
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ClipKeep 的定位写在 README 里：**零账号、零后端、纯本地、跨浏览器**。
+        会破坏这条定位的建议（要登录、要云同步、要联网调模型）大概率不会被接受，
+        但欢迎说明你的场景，我们可以一起想本地能做到的替代方案。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 用「我在做 X，现在只能 Y，很不方便」这种句式，比「希望有 Z 功能」更好判断
+      placeholder: "我每周会把上百条收藏整理成周报，现在只能一条条复制……"
+    validations:
+      required: true
+      maxlength: 1500
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你希望的用法
+      description: 具体到按钮在哪、点几下、结果长什么样
+    validations:
+      required: true
+      maxlength: 1500
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 现在你怎么办 / 试过别的方案吗
+      description: 手工绕法、别的扩展、别的工具都行
+    validations:
+      required: false
+      maxlength: 1000
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 落在哪个面
+      multiple: true
+      options:
+        - 划词工具条 / 收藏
+        - 高亮与批注
+        - 弹窗列表（搜索 / 标签 / 批量操作）
+        - 每日回顾 / 热力图
+        - 回收站与撤销
+        - 导出 Markdown / JSON 备份恢复
+        - 净化阅读
+        - 右键菜单 / 快捷键
+        - 界面与主题
+        - 国际化
+        - 安装与分发
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 实现范围（可选）
+      description: |
+        能估个大小最好：改一两个文件，还是要动存储结构？
+        动了存储结构就要考虑老数据兼容与备份格式，成本会明显上升。
+    validations:
+      required: false
+      maxlength: 1000
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: 你愿意做到哪一步
+      options:
+        - label: 我可以提 PR（先读 docs/CONTRIBUTING.md，测试要能跑）
+          required: false
+        - label: 我可以帮忙验证别人写的版本
+          required: false
+        - label: 我只有想法，实现交给维护者
+          required: false
