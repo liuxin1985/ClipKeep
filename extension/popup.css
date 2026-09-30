@@ -14,6 +14,7 @@
   --heat-3: #1d4ed8;
 }
 body.dark {
+  color-scheme: dark; /* 原生控件（复选框、滚动条）也跟着变暗，别在深色卡片上留一块白 */
   --bg: #0f1115;
   --card: #1a1d24;
   --text: #e5e7eb;
@@ -178,7 +179,11 @@ body.dark .badge-warn { color: #fcd34d; background: rgba(252, 211, 77, .16); }
   background: var(--card); border: 1px solid var(--border); border-radius: 14px;
   padding: 18px 16px; box-shadow: var(--shadow); text-align: center;
 }
-.rev-front { font-size: 15px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+/* 回顾正文限高：一条 2 万字的收藏不该把打分区和键位提示顶到屏幕外 */
+.rev-front {
+  font-size: 15px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+  max-height: 40vh; overflow-y: auto; padding-right: 2px;
+}
 .rev-back {
   margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border);
   text-align: left;
@@ -201,6 +206,9 @@ body.dark .badge-warn { color: #fcd34d; background: rgba(252, 211, 77, .16); }
 .rev-reveal:hover { background: var(--accent); color: #fff; }
 .rev-reveal[hidden] { display: none !important; }
 .rev-grade { display: flex; gap: 8px; margin-top: 16px; }
+/* 键位提示：不写出来的话没人知道回顾可以全程敲键盘（放在卡片上方才不会被长文顶掉） */
+.rev-keys { margin: 0 0 10px; font-size: 11px; color: var(--muted); text-align: center; }
+.rev-keys kbd { font-size: 10px; padding: 1px 5px; }
 .rev-grade[hidden] { display: none !important; }
 .rev-grade .mini-btn { flex: 1; padding: 9px 0; font-size: 13px; font-family: inherit; font-weight: 600; }
 .mini-btn.again { border-color: #fca5a5; color: #ef4444; }
@@ -327,6 +335,27 @@ kbd {
 .trashbar[hidden] { display: none; }
 .trash-text { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
 .trashbar .mini-btn { font-size: 12px; padding: 4px 9px; }
+
+/* ---------- 批量操作条 ---------- */
+.batchbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin: 8px 14px 0; padding: 8px 10px;
+  background: var(--card); border: 1px solid var(--accent-soft);
+  border-radius: 10px; box-shadow: var(--shadow);
+}
+.batchbar[hidden] { display: none; }
+/* 「已选 N 条」不许在词中间折行；数量单独占一行，按钮整排在下面，
+   380px 的弹窗里不会掉出「取消」一个人孤零零换行 */
+.batch-text { flex: 1 0 100%; white-space: nowrap; font-size: 12px; font-weight: 600; color: var(--accent); }
+.batchbar .mini-btn { font-size: 12px; padding: 4px 9px; }
+/* 复选框钉在卡片右上角，不占正文宽度；卡片本身要 relative 才钉得住 */
+.item { position: relative; padding-right: 34px; }
+.item-sel {
+  position: absolute; top: 10px; right: 10px;
+  display: flex; align-items: center; cursor: pointer;
+}
+.item-sel input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.item.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 /* ---------- 回顾热力图 ---------- */
 .heat-wrap {

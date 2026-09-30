@@ -44,6 +44,8 @@
   const modalEl = $("modal");
   const trashbarEl = $("trashbar");
   const trashTextEl = $("trash-text");
+  const batchEl = $("batchbar");
+  const batchTextEl = $("batch-text");
 
   let items = [];
   let marks = []; // 网页高亮 / 批注
@@ -55,7 +57,9 @@
   let toastTimer = null;
   let pendingRestore = null;
   let grading = false; // 回顾打分写入中
+  let mutating = false; // 列表写操作在途：连点会对着已经消失的数据再发一遍，提示就成了谎话
   let heatDay = ""; // 热力图里点开要看明细的那一天，空表示没展开
+  let selected = new Set(); // 批量操作选中的收藏 id，跨搜索 / 排序保留
 
   function toast(msg) {
     toastEl.textContent = msg;
@@ -120,6 +124,16 @@
     const url = mediaOf(it);
     if (!url) return "";
     return it.kind === "image" ? "查看原图" : hostname(url);
+  }
+
+  /**
+   * 媒体收藏的那枚可点链接：列表和回顾卡片共用一份，
+   * 图片显示「查看原图」（CDN 域名对用户没意义），链接显示域名，悬停看真实地址。
+   */
+  function mediaLinkHtml(it) {
+    const url = mediaOf(it);
+    if (!url) return "";
+    return `<a class="item-kind" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(url)}">${esc(mediaLabel(it))}</a>`;
   }
 
   /* ---------- 复习调度（Leitner 盒） ---------- */
@@ -292,6 +306,7 @@
     markCountEl.hidden = marks.length === 0;
     markCountEl.textContent = String(marks.length);
     renderTrashbar();
+    renderBatchbar();
     const due = dueItems().length;
     const queued = Math.min(due, reviewPrefs().cap);
     if (queued > 0) {
@@ -352,17 +367,18 @@
       ? `<span class="badge-warn" title="内容超过 ${MAX_TEXT} 字，仅保存了前半部分">已截断</span>`
       : "";
     // 图片 / 链接收藏：显示类型徽标 + 可点开的目标地址（不在扩展页里远程加载图）
-    const media = mediaOf(it);
     const isMedia = it.kind === "image" || it.kind === "link";
     const kindBadge = isMedia
       ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>`
       : "";
-    const mediaLink = media
-      ? `<a class="item-kind" href="${esc(media)}" target="_blank" rel="noopener" title="${esc(media)}">${esc(hostname(media))}</a>`
-      : "";
+    const mediaLink = mediaLinkHtml(it);
     const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
+    const on = selected.has(it.id);
     return `
-      <div class="item" data-id="${esc(it.id)}">
+      <div class="item${on ? " selected" : ""}" data-id="${esc(it.id)}">
+        <label class="item-sel" title="勾选后可批量删除 / 加标签 / 导出">
+          <input type="checkbox" data-act="sel" aria-label="选择这条收藏"${on ? " checked" : ""} />
+        </label>
         <div class="item-text${longClip ? " is-clamped" : ""}">${hit(text, q)}</div>
         ${note}
         <div class="item-meta">${trunc}${kindBadge}${tags}${mediaLink}${link}<span>${fmtDate(it.createdAt)}</span></div>
@@ -528,14 +544,18 @@
   $("btn-undo").addEventListener("click", async () => {
     const entry = trash[0];
     if (!entry) return;
-    const res = await API.runtime.sendMessage({ type: "clipkeep:trash-restore", tid: entry.tid });
-    if (!res || !res.ok) {
+    await withLock(async () => {
+      const res = await API.runtime.sendMessage({ type: "clipkeep:trash-restore", tid: entry.tid });
+      if (!res || !res.ok) {
+        await load();
+        toast(res && res.error === "not_found" ? "该条目已过期，无法撤销" : "撤销失败，请重试");
+        return;
+      }
       await load();
-      toast(res && res.error === "not_found" ? "该条目已过期，无法撤销" : "撤销失败，请重试");
-      return;
-    }
-    await load();
-    toast(res.exists ? "该内容已存在，未重复添加" : "已撤销删除 ✓");
+      // 批量删除共用一个撤销号，一次撤销还原整批，提示就要报出真实条数
+      const n = Number(res.restored) || 1;
+      toast(res.exists ? "该内容已存在，未重复添加" : n > 1 ? `已撤销 ${n} 条删除 ✓` : "已撤销删除 ✓");
+    });
   });
 
   $("btn-trash-clear").addEventListener("click", async () => {
@@ -753,12 +773,12 @@
       : "";
     const media = mediaOf(it);
     const kindTag = media
-      ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>` +
-        `<a class="item-kind" href="${esc(media)}" target="_blank" rel="noopener" title="${esc(media)}">${esc(hostname(media))}</a>`
+      ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>` + mediaLinkHtml(it)
       : "";
     const capNote = due.length > queued.length ? ` · 今日上限 ${cap} 条，剩余 ${due.length - queued.length} 条明天继续` : "";
     reviewEl.innerHTML = heat + `
       <div class="rev-progress">本组待回顾 ${queued.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}${capNote}</div>
+      <p class="rev-keys">快捷键：<kbd>空格</kbd> 显示答案 · <kbd>1</kbd> 忘记 · <kbd>2</kbd> 记得 · <kbd>3</kbd> 简单</p>
       <div class="rev-card" data-id="${esc(it.id)}">
         <div class="rev-front">${esc(it.text)}</div>
         <div class="rev-back" hidden>
@@ -772,6 +792,43 @@
           <button class="mini-btn easy" data-act="grade" data-g="2">简单</button>
         </div>
       </div>`;
+  }
+
+  /** 显示答案：按钮和打分区互换，键盘和点击共用这一份 */
+  function revealAnswer() {
+    const back = reviewEl.querySelector(".rev-back");
+    const gradeBox = reviewEl.querySelector(".rev-grade");
+    if (!back || !gradeBox) return false;
+    const btn = reviewEl.querySelector('[data-act="reveal"]');
+    back.hidden = false;
+    if (btn) btn.hidden = true;
+    gradeBox.hidden = false;
+    return true;
+  }
+
+  /** 答案是否已经露出来：没露就按数字，等于闭眼改排期 */
+  function answerRevealed() {
+    const gradeBox = reviewEl.querySelector(".rev-grade");
+    return !!gradeBox && gradeBox.hidden === false;
+  }
+
+  async function gradeCurrent(id, g) {
+    if (grading) return; // 写入在途时忽略后续点击，否则连点会一次跳两盒
+    const it = items.find((x) => x.id === id);
+    if (!it) return;
+    grading = true;
+    const btns = [...reviewEl.querySelectorAll(".rev-grade button")];
+    btns.forEach((b) => { b.disabled = true; });
+    grade(it, g);
+    let res = null;
+    try {
+      // 排期 + 当日打卡由后台一次写链完成，不会出现「分数存了、热力图没加」
+      res = await API.runtime.sendMessage({ type: "clipkeep:grade", id, review: it.review });
+      await load(); // 以存储为准：保存失败时把本地改动丢掉，不留下和存储不一致的排期
+    } finally {
+      grading = false; // 刷新完成后才交还点击权；卡片重渲染后按钮自然是可用状态
+    }
+    if (!res || !res.ok) toast("打分保存失败，已还原，请重试");
   }
 
   reviewEl.addEventListener("click", async (e) => {
@@ -794,31 +851,106 @@
     if (!card) return;
     const id = card.dataset.id;
     const act = btn.dataset.act;
-    if (act === "reveal") {
-      reviewEl.querySelector(".rev-back").hidden = false;
-      btn.hidden = true;
-      reviewEl.querySelector(".rev-grade").hidden = false;
-    } else if (act === "grade") {
-      if (grading) return; // 写入在途时忽略后续点击，否则连点会一次跳两盒
-      const it = items.find((x) => x.id === id);
-      if (!it) return;
-      grading = true;
-      const btns = [...reviewEl.querySelectorAll(".rev-grade button")];
-      btns.forEach((b) => { b.disabled = true; });
-      grade(it, Number(btn.dataset.g));
-      let res = null;
-      try {
-        // 排期 + 当日打卡由后台一次写链完成，不会出现「分数存了、热力图没加」
-        res = await API.runtime.sendMessage({ type: "clipkeep:grade", id, review: it.review });
-        await load(); // 以存储为准：保存失败时把本地改动丢掉，不留下和存储不一致的排期
-      } finally {
-        grading = false; // 刷新完成后才交还点击权；卡片重渲染后按钮自然是可用状态
-      }
-      if (!res || !res.ok) toast("打分保存失败，已还原，请重试");
+    if (act === "reveal") revealAnswer();
+    else if (act === "grade") await gradeCurrent(id, Number(btn.dataset.g));
+  });
+
+  /* 回顾页键盘打分：一条几百次的复习，手手点按钮比键盘慢得多 */
+  const GRADE_KEYS = { "1": 0, "2": 1, "3": 2 };
+
+  document.addEventListener("keydown", (e) => {
+    if (view !== "review" || !modalEl.hidden) return; // 确认弹窗开着时数字键归弹窗
+    const tag = e.target && e.target.tagName;
+    // 输入框 / 按钮上的按键归它们自己，别把打字和回车当成打分
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || tag === "A") return;
+    if (!reviewEl.querySelector(".rev-card")) return;
+    if (e.key === " " || e.key === "Enter") {
+      if (revealAnswer()) e.preventDefault(); // 空格不拦掉就是页面往下滚
+      return;
     }
+    const g = GRADE_KEYS[e.key];
+    if (g === undefined || !answerRevealed()) return;
+    e.preventDefault();
+    gradeCurrent(reviewEl.querySelector(".rev-card").dataset.id, g);
   });
 
   /* ---------- 收藏列表交互 ---------- */
+
+  /**
+   * 批量条：只在收藏视图、且真勾了东西时出现。
+   * 顺手把已经不存在的 id 剪掉——别处（另一个标签页、撤销过期）删过的收藏
+   * 不能继续留在选择里，否则批量动作会对着空气报错，数量也会骗人。
+   */
+  function renderBatchbar() {
+    const live = new Set(items.map((it) => it && it.id));
+    selected.forEach((id) => {
+      if (!live.has(id)) selected.delete(id);
+    });
+    const n = selected.size;
+    batchEl.hidden = view !== "clips" || n === 0;
+    batchTextEl.textContent = `已选 ${n} 条`;
+    const arr = view === "clips" ? filtered() : [];
+    const allOn = arr.length > 0 && arr.every((it) => selected.has(it.id));
+    $("btn-batch-all").textContent = allOn ? "取消全选" : "全选";
+  }
+
+  function toggleSelect(id, row, box) {
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+    const on = selected.has(id);
+    if (row) row.classList.toggle("selected", on);
+    if (box) box.checked = on; // 勾选状态以 Set 为准，重绘时也是它说了算
+    renderBatchbar();
+  }
+
+  /**
+   * 列表写操作排队：删除 / 加标签在途时忽略后续点击。
+   * 不拦的话连点两次会发两条消息，第二条对着已经消失的数据什么也没做，
+   * 却照样弹出「已删除，可撤销」——提示说谎比多一次点击更糟。
+   */
+  async function withLock(fn) {
+    if (mutating) return;
+    mutating = true;
+    try {
+      await fn();
+    } finally {
+      mutating = false;
+    }
+  }
+
+  async function batchDelete() {
+    const ids = [...selected];
+    if (!ids.length) return;
+    await withLock(async () => {
+      const res = await API.runtime.sendMessage({ type: "clipkeep:delete-many", ids });
+      await load(); // 以存储为准：删掉的 id 会在 renderBatchbar 里被剪掉
+      if (!res || !res.ok) return toast("批量删除失败，请重试");
+      // 一次能删的有上限，说清楚还剩多少，别让用户以为整批都干净了
+      toast(res.limited ? `已删除 ${res.removed} 条（单次上限），剩下的请再选一批` : `已删除 ${res.removed} 条，可撤销`);
+    });
+  }
+
+  async function batchTag() {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const val = prompt(`给选中的 ${ids.length} 条追加标签（逗号分隔）：`, "");
+    if (val === null) return;
+    if (!val.trim()) return toast("没有输入标签");
+    await withLock(async () => {
+      const res = await API.runtime.sendMessage({ type: "clipkeep:tag-add-many", ids, tags: val });
+      await load();
+      if (!res || !res.ok) return toast("批量加标签失败，请重试");
+      toast(res.changed ? `已给 ${res.changed} 条加标签` : "标签没有变化");
+    });
+  }
+
+  /** 批量导出按当前列表顺序，导出的就是用户看到的那一批 */
+  function batchExport() {
+    const arr = filtered().filter((it) => selected.has(it.id));
+    if (!arr.length) return toast("没有选中内容");
+    download(mdOf(arr), `clipkeep-${Date.now()}.md`);
+    toast(`已导出 ${arr.length} 条`);
+  }
 
   listEl.addEventListener("click", async (e) => {
     const btn = e.target.closest("[data-act]");
@@ -829,19 +961,25 @@
     const it = items.find((x) => x.id === id);
     if (!it) return;
     const act = btn.dataset.act;
-    if (act === "copy") copyText(mediaOf(it) || it.text);
+    if (act === "sel") toggleSelect(id, row, btn);
+    else if (act === "copy") copyText(mediaOf(it) || it.text);
     else if (act === "del") {
-      // 提示要跟着真实结果走：后台没写成功就不能报「已删除」
-      const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
-      await load();
-      toast(res && res.ok ? "已删除，可撤销" : "删除失败，请重试");
+      // 连点只认第一次：第二次对着已经消失的数据删除，提示就成了谎话
+      await withLock(async () => {
+        // 提示要跟着真实结果走：后台没写成功就不能报「已删除」
+        const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
+        await load();
+        toast(res && res.ok ? "已删除，可撤销" : "删除失败，请重试");
+      });
     }
     else if (act === "tag") {
       const val = prompt("输入标签，用逗号分隔：", (it.tags || []).join(","));
       if (val === null) return;
-      const res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { tags: val } });
-      await load();
-      toast(res && res.ok ? "标签已更新" : "保存失败，请重试");
+      await withLock(async () => {
+        const res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { tags: val } });
+        await load();
+        toast(res && res.ok ? "标签已更新" : "保存失败，请重试");
+      });
     } else if (act === "export") {
       download(mdOf([it]), `clipkeep-${it.id}.md`);
     } else if (act === "more") {
@@ -860,6 +998,19 @@
 
   searchEl.addEventListener("input", render);
   sortEl.addEventListener("change", renderClips);
+  $("btn-batch-all").addEventListener("click", () => {
+    const arr = filtered();
+    const allOn = arr.length > 0 && arr.every((it) => selected.has(it.id));
+    arr.forEach((it) => (allOn ? selected.delete(it.id) : selected.add(it.id)));
+    render();
+  });
+  $("btn-batch-tag").addEventListener("click", batchTag);
+  $("btn-batch-export").addEventListener("click", batchExport);
+  $("btn-batch-del").addEventListener("click", batchDelete);
+  $("btn-batch-cancel").addEventListener("click", () => {
+    selected.clear();
+    render();
+  });
   $("btn-theme").addEventListener("click", toggleTheme);
   $("btn-export").addEventListener("click", exportMd);
   $("btn-reader").addEventListener("click", triggerReader);

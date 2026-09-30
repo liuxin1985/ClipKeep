@@ -17,6 +17,7 @@ const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长（分钟�
 const DEFAULT_TRASH_MINS = 10;
 const ACTIVITY_DAYS = 120; // 活动记录只留最近 120 天
 const ACT_IDS_MAX = 100; // 每天最多留多少条复习明细，供热力图格子下钻查看
+const BATCH_MAX = 1000; // 单次批量操作最多处理多少条（弹窗全选几千条时也不会一次写爆）
 const INTERVALS = 6; // 记忆盒数量，用于把外部数据的盒号夹到合法区间
 const HL_COLORS = ["yellow", "green", "pink", "blue"];
 const SAFE_ID = /^[\w-]{1,64}$/; // 外部数据的 id 只允许安全字符，避免拼进 HTML 时越出属性
@@ -193,6 +194,21 @@ function cleanItem(raw) {
   return item;
 }
 
+/**
+ * 外部传来的 id 列表：只留合法字符、去重、夹住单次数量。
+ * 返回 null 表示这根本不是个列表（手改过的消息、旧版本前端），宁可整批不做。
+ */
+function cleanIds(ids) {
+  if (!Array.isArray(ids)) return null;
+  const seen = new Set();
+  for (const raw of ids) {
+    if (typeof raw === "string" && SAFE_ID.test(raw)) seen.add(raw);
+  }
+  const all = [...seen];
+  const keep = all.slice(0, BATCH_MAX);
+  return { ids: keep, limited: all.length > keep.length };
+}
+
 /** 同一条内容是否已经存过：类型、地址、来源、正文、备注、标签全同才算重复 */
 function sameAs(a, b) {
   return (
@@ -272,6 +288,47 @@ function updateItem(id, patch) {
       Object.assign(items[idx], media);
     }
     return { write: true, items, result: { ok: true, item: items[idx] } };
+  });
+}
+
+/**
+ * 批量删除：整批在同一条写链的一步里删掉，且共用一个撤销号（tid）。
+ * 分开 tid 的话用户点一次「撤销」只回来一条，剩下的照样算丢了。
+ */
+function deleteMany(ids) {
+  const q = cleanIds(ids);
+  if (!q) return Promise.resolve({ ok: false, error: "invalid" });
+  return mutate(async (items) => {
+    const want = new Set(q.ids);
+    const hit = items.filter((it) => it && want.has(it.id));
+    if (!hit.length) return { result: { ok: true, removed: 0, count: items.length, limited: q.limited } };
+    const tid = makeId();
+    await pushTrash(hit.map((it) => ({ ...trashEntry("clip", it), tid }))); // 整批一个撤销号
+    const next = items.filter((it) => it && !want.has(it.id));
+    return {
+      write: true,
+      items: next,
+      result: { ok: true, removed: hit.length, count: next.length, trashed: true, tid, limited: q.limited },
+    };
+  });
+}
+
+/** 批量追加标签：合并去重，一条都没选中就不写存储 */
+function tagAddMany(ids, tags) {
+  const q = cleanIds(ids);
+  const add = normalizeTags(tags);
+  if (!q || !add.length) return Promise.resolve({ ok: false, error: "invalid" });
+  return mutate((items) => {
+    const want = new Set(q.ids);
+    let changed = 0;
+    const next = items.map((it) => {
+      if (!it || !want.has(it.id)) return it;
+      const merged = normalizeTags((it.tags || []).concat(add));
+      if (merged.join("\n") === (it.tags || []).join("\n")) return it;
+      changed++;
+      return { ...it, tags: merged };
+    });
+    return { write: changed > 0, items: next, result: { ok: true, changed, limited: q.limited } };
   });
 }
 
@@ -409,15 +466,22 @@ function trashList() {
   });
 }
 
+/**
+ * 撤销一次删除。批量删除的多条记录共用同一个 tid，所以这里按 tid 成批还原：
+ * 点一次「撤销」只捞回一条的话，用户看到的还是「撤销了却少了几条」。
+ */
 function trashRestore(tid) {
   return mutateTrash(async (trash) => {
-    const idx = trash.findIndex((t) => t && t.tid === tid);
-    if (idx === -1) return { result: { ok: false, error: "not_found" } };
-    const entry = trash[idx];
-    trash.splice(idx, 1);
-    const res = await restoreEntry(entry);
-    if (!res.ok) return { result: { ok: false, error: "restore_failed" } };
-    return { write: true, list: trash, result: { ok: true, kind: entry.kind, exists: !!res.exists } };
+    const hit = trash.filter((t) => t && t.tid === tid);
+    if (!hit.length) return { result: { ok: false, error: "not_found" } };
+    let exists = false;
+    for (const entry of hit) {
+      const res = await restoreEntry(entry);
+      if (!res || !res.ok) return { result: { ok: false, error: "restore_failed" } };
+      if (res.exists) exists = true; // 整批里只要有一条撞了 id，提示就别再报「已撤销」
+    }
+    const rest = trash.filter((t) => !(t && t.tid === tid));
+    return { write: true, list: rest, result: { ok: true, kind: hit[0].kind, restored: hit.length, exists } };
   });
 }
 
@@ -658,6 +722,12 @@ if (API.runtime && API.runtime.onMessage) {
             break;
           case "clipkeep:delete":
             sendResponse(await deleteItem(msg.id));
+            break;
+          case "clipkeep:delete-many":
+            sendResponse(await deleteMany(msg.ids));
+            break;
+          case "clipkeep:tag-add-many":
+            sendResponse(await tagAddMany(msg.ids, msg.tags));
             break;
           case "clipkeep:update":
             sendResponse(await updateItem(msg.id, msg.patch || {}));

@@ -1844,6 +1844,11 @@ async function testMediaClips() {
     eq("图片收藏可点开原图地址", rows[0].querySelector("a.item-kind")?.getAttribute("href"), IMG);
     ok("链接收藏带类型徽标", /链接/.test(rows[1].innerHTML), rows[1].innerHTML.slice(0, 200));
     eq("链接收藏渲染目标地址", rows[1].querySelector("a.item-kind")?.getAttribute("href"), LINK);
+    eq("图片收藏显示「查看原图」", rows[0].querySelector("a.item-kind")?.textContent, "查看原图");
+    eq("图片收藏鼠标悬停仍能看到真实地址",
+       rows[0].querySelector("a.item-kind")?.getAttribute("title"), IMG);
+    eq("链接收藏显示域名，一眼看出来源",
+       rows[1].querySelector("a.item-kind")?.textContent, "docs.example.com");
     ok("普通收藏不渲染类型徽标", !rows[3].querySelector(".item-kind"), rows[3].innerHTML.slice(0, 200));
     ok("非法地址不渲染成链接", !rows[2].querySelector('a[href^="javascript"]'), rows[2].innerHTML.slice(0, 240));
     ok("弹窗不远程加载图片（离线且不暴露浏览记录）", p.qa(".item img").length === 0);
@@ -1936,6 +1941,7 @@ async function testMediaClips() {
     await p.click(p.qa(".tab").find((t) => t.dataset.view === "review"));
     ok("回顾卡片标出图片类型", /图片/.test(p.$("review").textContent), p.$("review").innerHTML.slice(0, 240));
     eq("回顾卡片能打开图片地址", p.$("review").querySelector("a.item-kind")?.getAttribute("href"), IMG);
+    eq("回顾卡片与列表用同一套显示文案", p.$("review").querySelector("a.item-kind")?.textContent, "查看原图");
     ok("回顾卡片里的伪协议来源不可点", !p.$("review").querySelector('a[href^="javascript"]'),
       p.$("review").innerHTML.slice(0, 300));
     ok("伪协议来源仍以文字说明，不假装能点", /javascript:/.test(p.$("review").textContent));
@@ -2233,6 +2239,505 @@ async function testColorPicker() {
 
 const typesIn = (code) => [...code.matchAll(/clipkeep:[a-z-]+/g)].map((m) => m[0]);
 
+/* ---------------- 3x. 收藏批量选择与操作 ---------------- */
+
+const batchSeed = (texts, now = Date.now()) => ({
+  clipkeep_items: texts.map((t, i) => ({
+    id: "b" + (i + 1), text: t, note: "", tags: [], url: "http://x/" + (i + 1),
+    title: "来源" + (i + 1), createdAt: now - i * 1000,
+  })),
+});
+
+async function testBatchOps() {
+  console.log("\n[3x] 批量选择与操作");
+  // 缺元素时返回个假的，让每条断言各自失败，而不是整节测试崩掉
+  const GHOST = {
+    hidden: true, textContent: "", value: "", checked: false, dataset: {},
+    classList: { contains: () => false }, querySelector: () => null, dispatchEvent: () => false,
+  };
+  const mk = async (texts) => {
+    const p = await mountPopup(batchSeed(texts || ["苹果派做法", "香蕉奶昔", "苹果树修剪"]));
+    const $ = (id) => p.$(id) || GHOST;
+    const sel = (i) => p.qa('#list .item input[data-act="sel"]')[i] || GHOST;
+    const rowSel = (i) => !!p.qa("#list .item")[i] && p.qa("#list .item")[i].classList.contains("selected");
+    const del = (i) => (p.qa("#list .item")[i] || GHOST).querySelector('[data-act="del"]') || GHOST;
+    const press = async (key, target) => {
+      const ev = new p.w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      (target || p.w.document).dispatchEvent(ev);
+      await tick(20);
+      return ev;
+    };
+    return { ...p, $, sel, rowSel, del, press };
+  };
+
+  /* 每条收藏都能勾上，勾上才出现批量条 */
+  {
+    const p = await mk();
+    eq("每条收藏有一个复选框", p.qa('#list .item input[data-act="sel"]').length, 3);
+    ok("未选中时批量条隐藏", p.$("batchbar").hidden === true);
+    await p.click(p.sel(0));
+    ok("勾上后批量条出现", p.$("batchbar").hidden === false);
+    eq("批量条报已选数量", p.$("batch-text").textContent, "已选 1 条");
+    ok("选中的卡片有 selected 类", p.rowSel(0));
+    await p.click(p.sel(1));
+    eq("再勾一条数量累加", p.$("batch-text").textContent, "已选 2 条");
+    await p.click(p.sel(0));
+    eq("取消勾选数量减少", p.$("batch-text").textContent, "已选 1 条");
+    ok("取消后卡片不再是选中态", !p.rowSel(0));
+    await p.click(p.sel(1));
+    ok("全部取消后批量条隐藏", p.$("batchbar").hidden === true);
+    await p.click(p.sel(2));
+    await p.click(p.$("btn-batch-cancel"));
+    ok("「取消」清空选择", p.$("batchbar").hidden === true);
+    ok("「取消」也清掉卡片选中态", p.qa("#list .item.selected").length === 0);
+  }
+
+  /* 全选跟着当前筛选走：先筛再全选，只选中匹配的那几条 */
+  {
+    const p = await mk();
+    p.$("search").value = "苹果";
+    await p.fire(p.$("search"), "input");
+    await p.click(p.$("btn-batch-all"));
+    eq("全选只选当前筛选结果", p.$("batch-text").textContent, "已选 2 条");
+    ok("筛选外的一条没被选", !p.rowSel(2));
+    await p.click(p.$("btn-batch-all"));
+    eq("再点一次全选清空", p.$("batch-text").textContent, "已选 0 条");
+    ok("清空后批量条隐藏", p.$("batchbar").hidden === true);
+  }
+
+  /* 选择要活过重渲染：改搜索词、换排序都不能把选择丢掉 */
+  {
+    const p = await mk();
+    await p.click(p.sel(0));
+    p.$("search").value = "香蕉";
+    await p.fire(p.$("search"), "input");
+    eq("换搜索词后选择还在", p.$("batch-text").textContent, "已选 1 条");
+    p.$("sort").value = "old";
+    await p.fire(p.$("sort"), "change");
+    eq("换排序后选择还在", p.$("batch-text").textContent, "已选 1 条");
+    p.$("search").value = "";
+    await p.fire(p.$("search"), "input");
+    eq("清掉筛选后复选框仍是勾选态", p.qa('#list input[data-act="sel"]:checked').length, 1);
+  }
+
+  /* 选中的条目被单条删除后，数量要跟着掉，不能选着不存在的 id */
+  {
+    const p = await mk();
+    await p.click(p.sel(0));
+    await p.click(p.sel(1));
+    eq("先选中两条", p.$("batch-text").textContent, "已选 2 条");
+    await p.click(p.del(0));
+    eq("单条删除后选择数同步减少", p.$("batch-text").textContent, "已选 1 条");
+    ok("存储里确实少了一条", p.store.clipkeep_items.length === 2);
+  }
+
+  /* 批量删除：一次进回收站，撤销要能把整批捞回来 */
+  {
+    const p = await mk();
+    await p.click(p.sel(0));
+    await p.click(p.sel(1));
+    await p.click(p.$("btn-batch-del"));
+    eq("批量删除只删选中项", p.store.clipkeep_items.map((x) => x.id).join(","), "b3");
+    ok("删除后批量条隐藏", p.$("batchbar").hidden === true);
+    eq("整批都进了回收站", (p.store.clipkeep_trash || []).length, 2);
+    eq("整批共用一个撤销 id", new Set((p.store.clipkeep_trash || []).map((t) => t.tid)).size, 1);
+    eq("撤销条数按整批显示", p.$("trash-text").textContent.replace(/\d+ 分钟/, "N 分钟"), "已删除 2 条收藏 · N 分钟内可撤销");
+    await p.click(p.$("btn-undo"));
+    eq("一次撤销还原整批", p.store.clipkeep_items.length, 3);
+    eq("撤销后回收站清空", (p.store.clipkeep_trash || []).length, 0);
+    eq("还原顺序仍按时间倒序", p.store.clipkeep_items.map((x) => x.id).join(","), "b1,b2,b3");
+  }
+
+  /* 批量加标签：合并去重，不碰没选中的 */
+  {
+    const p = await mk();
+    p.store.clipkeep_items[0].tags = ["工作"];
+    p.store.clipkeep_items[1].tags = ["重要", "工作"];
+    await p.click(p.sel(0));
+    await p.click(p.sel(1));
+    p.w.prompt = () => "工作, 待办";
+    await p.click(p.$("btn-batch-tag"));
+    eq("标签合并去重", p.store.clipkeep_items[0].tags.join("+"), "工作+待办");
+    eq("另一条同样生效", p.store.clipkeep_items[1].tags.join("+"), "重要+工作+待办");
+    eq("没选中的不受影响", p.store.clipkeep_items[2].tags.length, 0);
+    await p.click(p.sel(2));
+    p.w.prompt = () => "";
+    await p.click(p.$("btn-batch-tag"));
+    eq("空输入不加标签", p.store.clipkeep_items[2].tags.length, 0);
+  }
+
+  /* 批量导出：只包含选中的内容，走的是同一套 mdOf */
+  {
+    const p = await mk();
+    await p.click(p.sel(0));
+    await p.click(p.sel(2));
+    await p.click(p.$("btn-batch-export"));
+    await tick(20);
+    const md = p.getDownloaded() || "";
+    ok("导出含第一条", md.includes("苹果派做法"));
+    ok("导出含第三条", md.includes("苹果树修剪"));
+    ok("导出不含未选中的一条", !md.includes("香蕉奶昔"));
+    ok("导出条目数按选中计", md.includes("共 2 条"), md.slice(0, 80));
+  }
+
+  /* 后台是信任边界：id 要洗，数量要夹，撤销要成批 */
+  {
+    const p = await mk();
+    const items = () => p.store.clipkeep_items;
+    p.w.prompt = () => "x";
+    const del = (ids) => p.chrome.runtime.sendMessage({ type: "clipkeep:delete-many", ids });
+    const res = await del(["b1", "b1", "<img src=x>", "", null, "nope"]);
+    eq("只删合法且存在的 id", items().map((x) => x.id).join(","), "b2,b3");
+    eq("重复 id 不重复计", res.removed, 1);
+    eq("回收站一条撤销记录", new Set((p.store.clipkeep_trash || []).map((t) => t.tid)).size, 1);
+    const undo = await p.chrome.runtime.sendMessage({ type: "clipkeep:trash-restore", tid: ((p.store.clipkeep_trash || [])[0] || {}).tid });
+    eq("撤销返回还原条数", undo.restored, 1);
+    eq("撤销后原样回来", items().length, 3);
+    const none = await del(["<script>", 123, {}, []]);
+    eq("全是非法 id 时不删任何东西", items().length, 3);
+    eq("非法 id 也不写存储", none.removed, 0);
+    const many = Array.from({ length: 1200 }, (_, i) => "c" + i);
+    for (let i = 0; i < 1200; i++) items().push({ id: "c" + i, text: "t" + i, tags: [], createdAt: Date.now() - i });
+    const capped = await del(many);
+    eq("一次最多删 1000 条", capped.removed, 1000);
+    ok("被上限夹住时如实告知", capped.limited === true);
+    eq("超出上限的留着", items().length, 203);
+  }
+
+  /* 批量加标签的后台半边：字段要归一化，选不中就不写 */
+  {
+    const p = await mk();
+    const tag = (ids, tags) => p.chrome.runtime.sendMessage({ type: "clipkeep:tag-add-many", ids, tags });
+    const r1 = await tag(["b1", "b2"], "  前端 , 前端,待办");
+    eq("标签去重去空白", p.store.clipkeep_items[0].tags.join(","), "前端,待办");
+    eq("重复标签不堆叠", p.store.clipkeep_items[0].tags.length, 2);
+    eq("两条都改到", r1.changed, 2);
+    const before = JSON.stringify(p.store.clipkeep_items[2]);
+    const r2 = await tag(["ghost"], "孤立");
+    eq("选不中时 changed 为 0", r2.changed, 0);
+    eq("选不中时不写存储", JSON.stringify(p.store.clipkeep_items[2]), before);
+    const r3 = await tag(null, null);
+    eq("缺参数直接拒绝", r3.ok, false);
+    await tick(10);
+    eq("缺参数不改变数据", p.store.clipkeep_items.length, 3);
+  }
+
+  /* 切走视图要把批量条藏起来，别在回顾页上留一排删除按钮 */
+  {
+    const p = await mk();
+    await p.click(p.sel(0));
+    ok("收藏视图有批量条", p.$("batchbar").hidden === false);
+    await p.click(p.q('.tab[data-view="review"]'));
+    ok("回顾视图藏起批量条", p.$("batchbar").hidden === true);
+    await p.click(p.q('.tab[data-view="clips"]'));
+    ok("切回来选择还在", p.$("batch-text").textContent, "已选 1 条");
+  }
+
+  /* 样式：选择框与批量条要有真实规则，不能只有 DOM 结构 */
+  {
+    const css = src("popup.css");
+    ok(".item 为绝对定位的复选框留了 relative", /\.item\s*{[^}]*position:\s*relative/m.test(css));
+    ok("复选框样式存在", /\.item-sel\s*\{/.test(css));
+    ok("选中态有描边反馈", /\.item\.selected\s*\{/.test(css));
+    ok("批量条样式存在", /\.batchbar\s*\{/.test(css));
+    ok("深色模式下原生控件跟着变暗", /body\.dark\s*\{[^}]*color-scheme:\s*dark/.test(css));
+  }
+}
+
+/* ---------------- 3y. 回顾键盘打分 ---------------- */
+
+async function testReviewKeys() {
+  console.log("\n[3y] 回顾键盘打分");
+  const DAY = 86400000;
+  const now = Date.now();
+  const seed = () => ({
+    clipkeep_items: [
+      { id: "k1", text: "第一条", note: "答案一", tags: [], url: "http://x/1", title: "页面", createdAt: now, review: { box: 1, due: now - 10, seen: 1 } },
+      { id: "k2", text: "第二条", note: "答案二", tags: [], url: "http://x/2", title: "页面", createdAt: now - 5, review: { box: 1, due: now - 5, seen: 1 } },
+    ],
+  });
+  const open = async () => {
+    const p = await mountPopup(seed());
+    await p.click(p.q('.tab[data-view="review"]'));
+    const press = async (key, target) => {
+      const ev = new p.w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      (target || p.w.document).dispatchEvent(ev);
+      await tick(20);
+      return ev;
+    };
+    const rv = (id) => p.store.clipkeep_items.find((x) => x.id === id).review;
+    return { ...p, press, rv };
+  };
+
+  /* 空格＝显示答案，且不能把页面滚走 */
+  {
+    const p = await open();
+    ok("初始答案隐藏", p.q(".rev-back").hidden === true);
+    const ev = await p.press(" ");
+    ok("空格显示答案", p.q(".rev-back").hidden === false);
+    ok("空格后打分区可用", p.q(".rev-grade").hidden === false);
+    ok("「显示答案」按钮让位", p.q('[data-act="reveal"]').hidden === true);
+    ok("空格拦掉浏览器默认滚动", ev.defaultPrevented === true);
+    eq("卡片没被翻走", p.q(".rev-card").dataset.id, "k1");
+  }
+
+  /* 1/2/3＝忘记 / 记得 / 简单，走的是和点击同一条代码路径 */
+  {
+    const p = await open();
+    await p.press(" ");
+    await p.press("2");
+    eq("按 2 升 1 盒", p.rv("k1").box, 2);
+    eq("按 2 后间隔 3 天", p.rv("k1").due - Date.now(), 3 * DAY, 5000);
+    eq("翻到下一张卡", p.q(".rev-card").dataset.id, "k2");
+  }
+  {
+    const p = await open();
+    await p.press(" ");
+    await p.press("1");
+    eq("按 1 忘记回到盒 0", p.rv("k1").box, 0);
+    ok("按 1 立即再次到期", p.rv("k1").due <= Date.now() + 60);
+  }
+  {
+    const p = await open();
+    await p.press(" ");
+    await p.press("3");
+    eq("按 3 升 2 盒", p.rv("k1").box, 3);
+    eq("打卡计数 +1", p.rv("k1").seen, 2);
+  }
+
+  /* 答案没显示时不许打分：不然闭眼按数字就能把排期改掉 */
+  {
+    const p = await open();
+    const before = JSON.stringify(p.rv("k1"));
+    await p.press("3");
+    eq("未显示答案时忽略打分键", JSON.stringify(p.rv("k1")), before);
+    eq("未显示答案时卡片不变", p.q(".rev-card").dataset.id, "k1");
+    ok("未显示答案时打分区仍隐藏", p.q(".rev-grade").hidden === true);
+    await p.press("a");
+    eq("无关按键不打分", JSON.stringify(p.rv("k1")), before);
+  }
+
+  /* 连按数字：写入在途时第二次无效，和连点按钮同一道护栏 */
+  {
+    const p = await open();
+    await p.press(" ");
+    const g = () => {
+      const a = new p.w.KeyboardEvent("keydown", { key: "3", bubbles: true, cancelable: true });
+      p.w.document.dispatchEvent(a);
+      const b = new p.w.KeyboardEvent("keydown", { key: "3", bubbles: true, cancelable: true });
+      p.w.document.dispatchEvent(b);
+    };
+    g();
+    await tick(30);
+    eq("连按 3 只升 2 盒", p.rv("k1").box, 3);
+  }
+
+  /* 在输入框 / 设置面板里敲数字不该被当成打分 */
+  {
+    const p = await open();
+    await p.press(" ");
+    const before = JSON.stringify(p.rv("k1"));
+    await p.press("2", p.$("search"));
+    await p.press("2", p.$("sort"));
+    await p.press("2", p.$("set-cap"));
+    eq("搜索框里打字不打分", JSON.stringify(p.rv("k1")), before);
+    eq("卡片保持原样", p.q(".rev-card").dataset.id, "k1");
+  }
+
+  /* 恢复确认弹窗打开时，数字键留给弹窗，不能偷偷改排期 */
+  {
+    const p = await open();
+    await p.press(" ");
+    const before = JSON.stringify(p.rv("k1"));
+    p.$("modal").hidden = false;
+    await p.press("2");
+    eq("弹窗打开时不打分", JSON.stringify(p.rv("k1")), before);
+    p.$("modal").hidden = true;
+    await p.press("2");
+    ok("关掉弹窗后恢复打分", p.rv("k1").box === 2);
+  }
+
+  /* 只在回顾页生效 */
+  {
+    const p = await open();
+    await p.click(p.q('.tab[data-view="clips"]'));
+    const before = JSON.stringify(p.store.clipkeep_items);
+    const ev = await p.press(" ");
+    await p.press("2");
+    eq("收藏页按键不改数据", JSON.stringify(p.store.clipkeep_items), before);
+    ok("收藏页不拦空格", ev.defaultPrevented === false);
+    await p.click(p.q('.tab[data-view="marks"]'));
+    const b2 = JSON.stringify(p.store.clipkeep_items);
+    await p.press("3");
+    eq("高亮页按键不改数据", JSON.stringify(p.store.clipkeep_items), b2);
+  }
+
+  /* 键位要写在界面上，否则没人知道能按 */
+  {
+    const p = await open();
+    const hint = p.q(".rev-keys");
+    ok("回顾视图有键位提示", !!hint);
+    const t = hint ? hint.textContent : "";
+    ok("提示说明空格显示答案", t.includes("空格"), t);
+    ok("提示说明 1 是忘记", /1\s*忘记/.test(t), t);
+    ok("提示说明 3 是简单", /3\s*简单/.test(t), t);
+  }
+
+  /* 提示必须排在卡片前面：长文本卡片一撑高，写在卡片底下的提示就等于没有 */
+  {
+    const p = await open();
+    const kids = [...p.q("#review").children];
+    const hint = p.q(".rev-keys");
+    const card = p.q(".rev-card");
+    ok("键位提示在回顾卡片之前", kids.indexOf(hint) !== -1 && kids.indexOf(hint) < kids.indexOf(card),
+       `hint=${kids.indexOf(hint)}, card=${kids.indexOf(card)}`);
+  }
+
+  /* 全部复习完的空态里按数字，不能报错也不能有动作 */
+  {
+    const p = await open();
+    await p.press(" ");
+    await p.press("1");
+    await p.press("2");
+    await p.press("3");
+    await tick(30);
+    ok("队列清空后仍渲染", !!p.q(".review, .rev-card, .empty"));
+    const done = p.q(".empty.done") || (p.q(".review") && p.q(".review").querySelector(".empty"));
+    ok("清空后有空态或下一张卡", !!done || !!p.q(".rev-card"));
+  }
+
+  /* 样式：长文本收藏不能把打分区顶出屏幕，正文自己滚，按钮和键位常驻 */
+  {
+    const css = src("popup.css");
+    ok("回顾正文限高", /\.rev-front\s*\{[^}]*max-height:/.test(css));
+    ok("回顾正文超出部分自己滚", /\.rev-front\s*\{[^}]*overflow-y:\s*auto/.test(css));
+    ok("键位提示样式存在", /\.rev-keys\s*\{/.test(css));
+  }
+}
+
+/* ---------------- 3z. v1.7 审计：批量与键盘的提示诚实性 ---------------- */
+
+async function testV17Audit() {
+  console.log("\n[3z] v1.7 审计");
+  const now = Date.now();
+  const seed = (n = 3) => ({
+    clipkeep_items: Array.from({ length: n }, (_, i) => ({
+      id: "v" + (i + 1), text: "内容" + (i + 1), note: "", tags: [], url: "http://x/" + i,
+      title: "来源", createdAt: now - i * 1000,
+    })),
+  });
+  const mk = async (n) => {
+    const p = await mountPopup(seed(n));
+    const sent = [];
+    const orig = p.chrome.runtime.sendMessage.bind(p.chrome);
+    p.chrome.runtime.sendMessage = (msg, cb) => {
+      if (msg && msg.type) sent.push(msg.type);
+      return orig(msg, cb);
+    };
+    const boxes = () => p.qa('#list .item input[data-act="sel"]');
+    const pick = async (...idx) => {
+      idx.forEach((i) => boxes()[i].dispatchEvent(new p.w.MouseEvent("click", { bubbles: true })));
+      await tick(10);
+    };
+    const tapFast = (el) => {
+      el.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+      el.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true }));
+    };
+    const count = (type) => sent.filter((t) => t === type).length;
+    return { ...p, sent, pick, tapFast, count, toast: () => p.$("toast").textContent };
+  };
+
+  /* 批量删除连点：第二次不能对着已经删掉的一批再发一次 */
+  {
+    const p = await mk();
+    await p.pick(0, 1);
+    p.tapFast(p.$("btn-batch-del"));
+    await tick(40);
+    eq("连点只发一次批量删除", p.count("clipkeep:delete-many"), 1);
+    eq("连点只删掉选中的两条", p.store.clipkeep_items.length, 1);
+    ok("提示不会报「已删除 0 条」", !/已删除 0/.test(p.toast()), p.toast());
+  }
+
+  /* 单条删除连点：同理，别把「已删除，可撤销」说第二遍 */
+  {
+    const p = await mk();
+    p.tapFast(p.qa('#list .item [data-act="del"]')[0]);
+    await tick(40);
+    eq("连点只发一次单条删除", p.count("clipkeep:delete"), 1);
+    eq("回收站只有一条", (p.store.clipkeep_trash || []).length, 1);
+    eq("只删掉一条", p.store.clipkeep_items.length, 2);
+  }
+
+  /* 批量加标签连点：prompt 是同步的，第二次点击不能又发一遍 */
+  {
+    const p = await mk();
+    await p.pick(0, 1);
+    p.w.prompt = () => "待办";
+    p.tapFast(p.$("btn-batch-tag"));
+    await tick(40);
+    eq("连点只发一次批量加标签", p.count("clipkeep:tag-add-many"), 1);
+  }
+
+  /* 单条加标签同理：同一个坑不能只堵一半 */
+  {
+    const p = await mk();
+    p.w.prompt = () => "待办";
+    p.tapFast(p.qa('#list .item [data-act="tag"]')[0]);
+    await tick(40);
+    eq("连点只发一次单条加标签", p.count("clipkeep:update"), 1);
+  }
+
+  /* 清空全部之后，选择里不能留着已经不存在的 id，批量条要跟着消失 */
+  {
+    const p = await mk();
+    await p.pick(0, 1);
+    ok("清空前有批量条", p.$("batchbar").hidden === false);
+    await p.click(p.$("btn-clear"));
+    ok("清空全部后批量条消失", p.$("batchbar").hidden === true);
+    eq("收藏确实清空了", p.store.clipkeep_items.length, 0);
+    await p.click(p.q('.tab[data-view="clips"]'));
+    ok("切回收藏页也没有幽灵选择", p.$("batchbar").hidden === true);
+  }
+
+  /* 撤销整批要说清还原了几条，不能只说「已撤销」 */
+  {
+    const p = await mk(4);
+    await p.pick(0, 1, 2);
+    await p.click(p.$("btn-batch-del"));
+    eq("三条一起进回收站", new Set(p.store.clipkeep_trash.map((t) => t.tid)).size, 1);
+    await p.click(p.$("btn-undo"));
+    ok("撤销提示报条数", /3/.test(p.toast()), p.toast());
+    eq("三条都回来了", p.store.clipkeep_items.length, 4);
+  }
+
+  /* 长按数字键：自动重复不能把整队复习刷完 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        { id: "r1", text: "第一条", note: "a", tags: [], url: "http://x/1", title: "t", createdAt: now, review: { box: 0, due: now - 30, seen: 1 } },
+        { id: "r2", text: "第二条", note: "b", tags: [], url: "http://x/2", title: "t", createdAt: now - 1, review: { box: 0, due: now - 20, seen: 1 } },
+      ],
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    const press = async (key, repeat) => {
+      p.w.document.dispatchEvent(new p.w.KeyboardEvent("keydown", { key, repeat: !!repeat, bubbles: true, cancelable: true }));
+      await tick(20);
+    };
+    await press(" ", false);
+    await press("2", false);
+    await tick(30);
+    eq("正常按一次升 1 盒", p.store.clipkeep_items.find((x) => x.id === "r1").review.box, 1);
+    eq("翻到下一张卡", p.q(".rev-card").dataset.id, "r2");
+    await press("2", true);
+    await press("2", true);
+    await tick(30);
+    eq("长按自动重复不打分", p.store.clipkeep_items.find((x) => x.id === "r2").review.box, 0);
+    eq("卡片没被连按翻走", p.q(".rev-card").dataset.id, "r2");
+  }
+}
+
+/* ---------------- 4. 清单一致性 ---------------- */
+
 async function testManifests() {
   console.log("\n[4] 清单一致性：Chrome / Safari / 消息协议 / 版本与文档");
   const ROOT = path.resolve(EXT, "..");
@@ -2302,7 +2807,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testV17Audit, testManifests];
   for (const s of suites) {
     try {
       await s();

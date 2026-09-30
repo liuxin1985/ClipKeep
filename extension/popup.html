@@ -38,6 +38,16 @@
       <button id="btn-hl-export" class="icon-btn" title="导出高亮批注为 Markdown" hidden>⬇</button>
     </section>
 
+    <!-- 批量操作条（勾选收藏后出现，只对当前视图里的选中项生效） -->
+    <section class="batchbar" id="batchbar" hidden>
+      <span class="batch-text" id="batch-text">已选 0 条</span>
+      <button id="btn-batch-all" class="mini-btn">全选</button>
+      <button id="btn-batch-tag" class="mini-btn">加标签</button>
+      <button id="btn-batch-export" class="mini-btn">导出</button>
+      <button id="btn-batch-del" class="mini-btn danger">删除</button>
+      <button id="btn-batch-cancel" class="mini-btn">取消</button>
+    </section>
+
     <!-- 设置面板 -->
     <section class="settings" id="settings" hidden>
       <label class="set-row">
