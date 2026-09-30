@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ClipKeep 划词工具条目测页（本地目测用，不入库）</title>
+<link rel="stylesheet" href="content.css">
+<style>
+  body { max-width: 720px; margin: 40px auto; font: 15px/1.8 -apple-system, "PingFang SC", sans-serif; padding: 0 20px; }
+  #log { display: none; margin-top: 32px; padding: 12px; background: #f6f7f9; border-radius: 8px; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h2>量子计算入门</h2>
+<p id="p1">量子比特可以同时处于两种状态的叠加态，这意味着 n 个量子比特能够同时表示 2 的 n 次方个状态。在算法层面，量子并行让我们有机会一次评估指数级多的输入分支，再通过干涉把错误答案相消、把正确答案放大。</p>
+<p id="p2">Grover 搜索给出平方级加速，Shor 分解则在多项式时间内完成大整数分解，这也是后量子密码要提前换轨的原因。</p>
+<p id="p3">退相干时间决定了能做多少层门，纠错码用多个物理比特拼一个逻辑比特，代价是门保真度必须高于阈值。</p>
+<div id="log">—</div>
+
+<script>
+/* 浏览器里跑 content.js 用的最小 chrome 桩 */
+(() => {
+  const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_trash: [], clipkeep_activity: {}, clipkeep_prefs: {} };
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  const listeners = [];
+  const dump = () => { document.getElementById("log").textContent = JSON.stringify(store.clipkeep_highlights, null, 1); };
+  window.__ckStore = store;
+  window.__ckDump = dump;
+  chrome = {
+    storage: {
+      local: {
+        async get(keys) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          const out = {};
+          list.forEach((k) => { if (k in store) out[k] = clone(store[k]); });
+          dump();
+          return out;
+        },
+        async set(obj) { Object.assign(store, clone(obj)); dump(); },
+      },
+      onChanged: { addListener() {} },
+    },
+    runtime: {
+      sendMessage(msg, cb) {
+        const done = (res) => { dump(); if (typeof cb === "function") cb(res); return res; };
+        if (typeof msg === "function" || !msg || !msg.type) return Promise.resolve(done({ ok: true }));
+        if (msg.type === "clipkeep:hl-add") { store.clipkeep_highlights.push(msg.payload); return done({ ok: true, id: msg.payload.id }); }
+        if (msg.type === "clipkeep:hl-update") {
+          const h = store.clipkeep_highlights.find((x) => x.id === msg.id);
+          if (h) Object.assign(h, msg.patch);
+          return done({ ok: true });
+        }
+        if (msg.type === "clipkeep:add") {
+          if (msg.payload) store.clipkeep_items.push(msg.payload); // 桩也要真的落库，截图才不是空列表
+          return done({ ok: true, items: store.clipkeep_items });
+        }
+        return done({ ok: true, items: store.clipkeep_items });
+      },
+      onMessage: { addListener(fn) { listeners.push(fn); } },
+      getURL: (p) => p,
+    },
+    tabs: { async query() { return [{ id: 1 }]; }, async sendMessage() { return { ok: true }; } },
+  };
+})();
+</script>
+<script src="content.js"></script>
+<script>
+/* 模拟「划选一段文字」：真浏览器里用鼠标拖，这里用脚本选区，工具条一样会弹出 */
+window.__ckSelect = (id, from, to) => {
+  const node = document.getElementById(id).firstChild;
+  const r = document.createRange();
+  r.setStart(node, from);
+  r.setEnd(node, to);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+  document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  return node.data.slice(from, to);
+};
+</script>
+</body>
+</html>

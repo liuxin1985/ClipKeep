@@ -18,3 +18,12 @@ _build/
 
 # 本地授权备忘，绝不提交
 LOCAL-AUTH.md
+
+# 演示动图的中间产物：截图与自动生成的截图页，不入库
+.shots/
+docs/demo/shot.html
+docs/demo/web_shot.html
+docs/demo/popup.css
+docs/demo/popup.js
+docs/demo/content.js
+docs/demo/content.css
