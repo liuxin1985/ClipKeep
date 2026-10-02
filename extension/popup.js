@@ -19,6 +19,9 @@
   const HEAT_ROWS_MAX = 100; // 格子下钻最多渲染多少条明细（和后台 ACT_IDS_MAX 对齐）
   const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长
   const DEFAULT_TRASH_MINS = 10;
+  const KIND_LABELS = { text: "文字", image: "图片", link: "链接" }; // 列表筛选 chip 的文案
+  const KIND_ORDER = ["text", "image", "link"]; // 后台只认这三种，顺序固定免得 chip 乱跳
+  const SITE_CHIPS_MAX = 12; // 站点 chip 的渲染上限：库里几百个站时不能铺成一堵墙
   const HEADINGS = ["numbered", "title", "text", "date"]; // Markdown 导出的小标题写法
   const DEFAULT_PREFS = {
     review: { cap: 20, mult: 1 },
@@ -46,6 +49,8 @@
   const trashTextEl = $("trash-text");
   const batchEl = $("batchbar");
   const batchTextEl = $("batch-text");
+  const filterEl = $("filterbar");
+  const keysEl = $("keys-help");
 
   let items = [];
   let marks = []; // 网页高亮 / 批注
@@ -53,6 +58,9 @@
   let activity = {}; // { "2026-09-27": 5 } 每日回顾条数
   let prefs = DEFAULT_PREFS;
   let activeTag = "";
+  let activeKind = ""; // 列表按剪藏类型筛选，空表示不限
+  let activeSite = ""; // 列表按来源站点筛选，空表示不限
+  let focusId = ""; // 方向键在列表里选中的那条（键盘流的操作对象）
   let view = "clips";
   let toastTimer = null;
   let pendingRestore = null;
@@ -117,6 +125,14 @@
     if (!it || (it.kind !== "image" && it.kind !== "link")) return "";
     const url = String((it.kind === "image" ? it.image : it.link) || "");
     return /^https?:\/\//i.test(url) ? url : "";
+  }
+
+  /**
+   * 列表筛选用的类型：后台只写 image / link，文字收藏不写 kind。
+   * 未知值一律当文字，免得备份里塞个 video 就冒出一个永远筛不出东西的 chip。
+   */
+  function kindOf(it) {
+    return it && (it.kind === "image" || it.kind === "link") ? it.kind : "text";
   }
 
   /** 列表里显示的可读标签 */
@@ -282,10 +298,57 @@
       .join("");
   }
 
+  /**
+   * 类型 / 站点筛选条。只在「确实有得筛」时出现：
+   * 库里一种类型、一个站点（或全是无来源的手动收藏）时摆一排 chip 只是骗人点。
+   * chip 只列库里真存在的值，数据一变（比如最后一条图片被删）幽灵选项就跟着消失。
+   */
+  function renderFilterbar() {
+    if (view !== "clips") {
+      filterEl.hidden = true;
+      filterEl.innerHTML = "";
+      return;
+    }
+    const kinds = new Map();
+    const sites = new Map();
+    for (const it of items) {
+      const k = kindOf(it);
+      kinds.set(k, (kinds.get(k) || 0) + 1);
+      const h = String(it && it.url ? hostname(it.url) : "");
+      if (h) sites.set(h, (sites.get(h) || 0) + 1);
+    }
+    if (activeKind && !kinds.has(activeKind)) activeKind = "";
+    if (activeSite && !sites.has(activeSite)) activeSite = "";
+    if (kinds.size < 2 && sites.size < 2) {
+      filterEl.hidden = true;
+      filterEl.innerHTML = "";
+      return;
+    }
+    filterEl.hidden = false;
+    const kindHtml = kinds.size < 2 ? "" : [...kinds.keys()]
+      .sort((a, b) => {
+        const ia = KIND_ORDER.indexOf(a);
+        const ib = KIND_ORDER.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+      })
+      .map((k) => `<button class="chip ${k === activeKind ? "active" : ""}" data-kind="${esc(k)}">${esc(KIND_LABELS[k] || k)} ${kinds.get(k)}</button>`)
+      .join("");
+    const sorted = [...sites.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const shown = sorted.slice(0, SITE_CHIPS_MAX);
+    const siteHtml = sorted.length < 2 ? ""
+      : shown.map(([h, n]) => `<button class="chip site ${h === activeSite ? "active" : ""}" data-site="${esc(h)}" title="${esc(h)}">${esc(h)} ${n}</button>`).join("")
+        + (sorted.length > shown.length
+            ? `<span class="f-more" title="还有 ${sorted.length - shown.length} 个站点没有列出，用搜索找它们的域名">+${sorted.length - shown.length} 站</span>`
+            : "");
+    filterEl.innerHTML = kindHtml + siteHtml;
+  }
+
   function filtered() {
     const q = searchEl.value.trim().toLowerCase();
     let arr = items.filter((it) => {
       if (activeTag && !(it.tags || []).includes(activeTag)) return false;
+      if (activeKind && kindOf(it) !== activeKind) return false;
+      if (activeSite && String(it && it.url ? hostname(it.url) : "") !== activeSite) return false;
       if (!q) return true;
       return (
         (it.text || "").toLowerCase().includes(q) ||
@@ -305,6 +368,7 @@
     countEl.textContent = String(items.length);
     markCountEl.hidden = marks.length === 0;
     markCountEl.textContent = String(marks.length);
+    renderFilterbar(); // 先洗掉失效的筛选，批量条的「全选」才不会跟着一个幽灵条件
     renderTrashbar();
     renderBatchbar();
     const due = dueItems().length;
@@ -336,9 +400,15 @@
     listEl.querySelectorAll(".item").forEach((n) => n.remove());
     if (arr.length === 0) {
       emptyEl.style.display = "block";
-      emptyEl.querySelector("p").textContent = items.length === 0 ? "还没有收藏" : "无匹配结果";
+      // 库里明明有东西却一条不显示，提示就得说「是筛选筛掉的」，不能谎称还没有收藏
+      const filtering = Boolean(activeTag || activeKind || activeSite || searchEl.value.trim());
+      emptyEl.querySelector("p").textContent = items.length === 0 ? "还没有收藏" : filtering ? "筛选后没有结果" : "无匹配结果";
       emptyEl.querySelector("span").textContent =
-        items.length === 0 ? "在网页上划选文字，点「收藏」即可留存到这里。" : "换个关键词或标签试试。";
+        items.length === 0
+          ? "在网页上划选文字，点「收藏」即可留存到这里。"
+          : filtering
+            ? "当前有关键词 / 标签 / 类型 / 站点筛选，去掉一个试试。"
+            : "换个关键词或标签试试。";
       return;
     }
     emptyEl.style.display = "none";
@@ -375,7 +445,7 @@
     const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
     const on = selected.has(it.id);
     return `
-      <div class="item${on ? " selected" : ""}" data-id="${esc(it.id)}">
+      <div class="item${on ? " selected" : ""}${it.id === focusId ? " focused" : ""}" data-id="${esc(it.id)}">
         <label class="item-sel" title="勾选后可批量删除 / 加标签 / 导出">
           <input type="checkbox" data-act="sel" aria-label="选择这条收藏"${on ? " checked" : ""} />
         </label>
@@ -860,6 +930,7 @@
 
   document.addEventListener("keydown", (e) => {
     if (view !== "review" || !modalEl.hidden) return; // 确认弹窗开着时数字键归弹窗
+    if (!keysEl.hidden) return; // 快捷键帮助浮层开着时，键盘归浮层
     const tag = e.target && e.target.tagName;
     // 输入框 / 按钮上的按键归它们自己，别把打字和回车当成打分
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || tag === "A") return;
@@ -872,6 +943,60 @@
     if (g === undefined || !answerRevealed()) return;
     e.preventDefault();
     gradeCurrent(reviewEl.querySelector(".rev-card").dataset.id, g);
+  });
+
+  /**
+   * 收藏列表的键盘流：↑/↓ 移焦点、x 勾选、Enter 展开、? 帮助。
+   * 三条边界：正在打字不算快捷键；确认弹窗 / 帮助浮层开着时按键归它们；
+   * 只在收藏视图生效，高亮和回顾各有自己的键位，不串台。
+   */
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const tag = e.target && e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || tag === "A") return;
+    if (!keysEl.hidden) {
+      if (e.key === "Escape" || e.key === "?") {
+        e.preventDefault();
+        setKeysHelp(false);
+      }
+      return;
+    }
+    if (e.key === "?") {
+      e.preventDefault();
+      setKeysHelp(true);
+      return;
+    }
+    if (view !== "clips" || !modalEl.hidden) return; // 弹窗开着时按键归弹窗；高亮 / 回顾各有键位
+    const arr = filtered();
+    const at = arr.findIndex((it) => it.id === focusId);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault(); // 不拦掉就是整页往下滚，焦点看着像没动
+      if (arr.length === 0) { focusId = ""; render(); return; }
+      const next = e.key === "ArrowDown"
+        ? Math.min(at + 1, arr.length - 1)
+        : Math.max(at - 1, 0);
+      focusId = arr[next < 0 ? 0 : next].id;
+      render();
+      const row = listEl.querySelector(".item.focused");
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (e.key === "x" || e.key === "X") {
+      if (!focusId || !arr.some((it) => it.id === focusId)) return;
+      e.preventDefault();
+      if (selected.has(focusId)) selected.delete(focusId);
+      else selected.add(focusId);
+      render();
+      return;
+    }
+    if (e.key === "Enter") {
+      const row = listEl.querySelector(".item.focused");
+      const btn = row && row.querySelector('[data-act="more"]');
+      if (btn) {
+        e.preventDefault();
+        btn.click(); // 展开逻辑只有列表那套，别再抄一份
+      }
+    }
   });
 
   /* ---------- 收藏列表交互 ---------- */
@@ -996,12 +1121,38 @@
     render();
   });
 
+  filterEl.addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    if (chip.dataset.kind !== undefined) {
+      activeKind = activeKind === chip.dataset.kind ? "" : chip.dataset.kind;
+    } else if (chip.dataset.site !== undefined) {
+      activeSite = activeSite === chip.dataset.site ? "" : chip.dataset.site;
+    } else {
+      return;
+    }
+    render();
+  });
+
+  /* 快捷键帮助：鼠标和键盘走同一个开关，点遮罩也能关 */
+  function setKeysHelp(on) {
+    keysEl.hidden = !on;
+    $("btn-keys").classList.toggle("active", on);
+  }
+  $("btn-keys").addEventListener("click", () => setKeysHelp(keysEl.hidden));
+  keysEl.addEventListener("click", (e) => {
+    if (e.target === keysEl || e.target.closest('[data-act="close"]')) setKeysHelp(false);
+  });
+
   searchEl.addEventListener("input", render);
   sortEl.addEventListener("change", renderClips);
+
   $("btn-batch-all").addEventListener("click", () => {
     const arr = filtered();
     const allOn = arr.length > 0 && arr.every((it) => selected.has(it.id));
-    arr.forEach((it) => (allOn ? selected.delete(it.id) : selected.add(it.id)));
+    // 全选的范围是「当前筛出来的这一批」：换筛选后再点，选中集合跟着换，
+    // 不会把上一次筛选里没再显示出来的条目悄悄带进批量删除
+    selected = new Set(allOn ? [] : arr.map((it) => it.id));
     render();
   });
   $("btn-batch-tag").addEventListener("click", batchTag);
@@ -1011,8 +1162,7 @@
     selected.clear();
     render();
   });
-  $("btn-theme").addEventListener("click", toggleTheme);
-  $("btn-export").addEventListener("click", exportMd);
+  $("btn-theme").addEventListener("click", toggleTheme);  $("btn-export").addEventListener("click", exportMd);
   $("btn-reader").addEventListener("click", triggerReader);
 
   document.querySelector(".tabs").addEventListener("click", (e) => {

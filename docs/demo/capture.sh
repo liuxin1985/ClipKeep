@@ -33,7 +33,7 @@ snap() { # snap 名称 URL 宽 高
 # 文章页（划选工具条 / 收藏卡片 / 高亮落地）
 snap "w_sel"  "file://$HERE/web_shot.html?m=sel"  900 560
 snap "w_card" "file://$HERE/web_shot.html?m=card" 900 560
-# 弹窗三个视图 + 批量选择 + 键盘打分 + 深色模式（380x600 就是真 popup 尺寸）
-for f in clips batch2 batchall review reveal marks dark; do
+# 弹窗三个视图 + 批量选择 + 键盘打分 + 类型筛选 + 键盘焦点 + 快捷键帮助 + 深色模式（380x600 就是真 popup 尺寸）
+for f in clips batch2 batchall review reveal marks filter focus keys dark; do
   snap "p_$f" "file://$HERE/shot.html?f=$f" 380 600
 done

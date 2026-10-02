@@ -74,6 +74,14 @@ body {
 
 .tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px; }
 .tags:empty { display: none; }
+
+/* 类型 / 站点筛选条：只在库里确实有得筛时出现，域名 chip 太长要截断 */
+.filterbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px 0; align-items: center; }
+.filterbar[hidden] { display: none; }
+.filterbar .chip.site {
+  max-width: 158px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.f-more { font-size: 11px; color: var(--muted); }
 .chip {
   border: 1px solid var(--border); background: var(--card); color: var(--muted);
   font-size: 12px; padding: 2px 10px; border-radius: 999px; cursor: pointer;
@@ -90,6 +98,8 @@ body {
   background: var(--card); border: 1px solid var(--border); border-radius: 12px;
   padding: 12px; margin-bottom: 10px; box-shadow: var(--shadow);
 }
+/* 键盘焦点：必须一眼看出「现在按的是哪条」，否则方向键等于盲按 */
+.item.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .item-text { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
 /* 超长收藏默认折 6 行，点「展开全文」再放开（列表是滚动区，别被一条顶到天） */
 .item-text.is-clamped {
@@ -267,6 +277,25 @@ kbd {
 }
 .tagops { display: flex; gap: 4px; }
 .tagops .mini-btn { font-size: 11px; padding: 3px 7px; }
+
+/* ---------- 快捷键帮助浮层 ---------- */
+.keys-help {
+  position: fixed; inset: 0; z-index: 35;
+  background: rgba(17, 24, 39, 0.45);
+  display: flex; align-items: center; justify-content: center; padding: 18px;
+}
+.keys-help[hidden] { display: none; }
+.kh-card {
+  width: 100%; background: var(--card); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28); padding: 14px 16px;
+}
+.kh-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.kh-head h4 { margin: 0; font-size: 15px; color: var(--text); }
+.kh-list { margin: 0; padding: 0; list-style: none; }
+.kh-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 12px; }
+.kh-keys { display: flex; gap: 3px; flex: 0 0 96px; }
+.kh-desc { color: var(--muted); line-height: 1.5; }
+.kh-hint { margin: 8px 0 0; font-size: 11px; color: var(--muted); }
 
 /* ---------- 恢复差异确认弹窗 ---------- */
 .modal {

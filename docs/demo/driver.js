@@ -54,6 +54,25 @@
       click(q('.tab[data-view="marks"]'));
       await until(marksReady);
     },
+    filter: async () => {
+      await until(listReady);
+      await until(() => q("#filterbar [data-kind]"));
+      click(q('#filterbar [data-kind="image"]'));
+      await until(() => qa("#list .item").length === 1);
+    },
+    focus: async () => {
+      await until(listReady);
+      key("ArrowDown");
+      key("ArrowDown");
+      key("ArrowDown");
+      key("x");
+      await until(() => q("#batchbar") && !q("#batchbar").hidden);
+    },
+    keys: async () => {
+      await until(listReady);
+      key("?");
+      await until(() => q("#keys-help") && !q("#keys-help").hidden);
+    },
     dark: async () => {
       await until(listReady);
       click(q('#btn-theme'));

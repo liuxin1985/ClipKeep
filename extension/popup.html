@@ -14,6 +14,7 @@
         <span class="count" id="count">0</span>
       </div>
       <div class="header-actions">
+        <button id="btn-keys" class="icon-btn" title="键盘快捷键（?）">?</button>
         <button id="btn-reader" class="icon-btn" title="净化阅读当前页">📖</button>
         <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
         <button id="btn-theme" class="icon-btn" title="切换深色模式">🌙</button>
@@ -46,6 +47,26 @@
       <button id="btn-batch-export" class="mini-btn">导出</button>
       <button id="btn-batch-del" class="mini-btn danger">删除</button>
       <button id="btn-batch-cancel" class="mini-btn">取消</button>
+    </section>
+
+    <!-- 快捷键帮助：只列真能用的键，? 或右上角按钮开关 -->
+    <section class="keys-help" id="keys-help" hidden>
+      <div class="kh-card">
+        <div class="kh-head">
+          <h4>键盘快捷键</h4>
+          <button class="mini-btn" data-act="close">关闭</button>
+        </div>
+        <ul class="kh-list">
+          <li><span class="kh-keys"><kbd>↑</kbd><kbd>↓</kbd></span><span class="kh-desc">在收藏列表里移动焦点</span></li>
+          <li><span class="kh-keys"><kbd>x</kbd></span><span class="kh-desc">勾选 / 取消勾选焦点那条，配合批量操作</span></li>
+          <li><span class="kh-keys"><kbd>Enter</kbd></span><span class="kh-desc">展开 / 收起焦点那条的全文</span></li>
+          <li><span class="kh-keys"><kbd>空格</kbd></span><span class="kh-desc">回顾时显示答案</span></li>
+          <li><span class="kh-keys"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></span><span class="kh-desc">回顾打分：忘记 / 记得 / 简单（要先看答案）</span></li>
+          <li><span class="kh-keys"><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd></span><span class="kh-desc">网页上把选区一秒存进 ClipKeep</span></li>
+          <li><span class="kh-keys"><kbd>?</kbd><kbd>Esc</kbd></span><span class="kh-desc">打开 / 关闭这份快捷键说明</span></li>
+        </ul>
+        <p class="kh-hint">输入框里打字时这些键不生效，放心搜索。</p>
+      </div>
     </section>
 
     <!-- 设置面板 -->
@@ -101,6 +122,7 @@
 
     <!-- 收藏视图 -->
     <div id="view-clips" class="view">
+      <section class="filterbar" id="filterbar" hidden></section>
       <section class="tags" id="tags"></section>
       <section class="tagbox" id="tagbox" hidden></section>
       <main class="list" id="list">

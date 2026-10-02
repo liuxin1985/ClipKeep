@@ -2615,6 +2615,323 @@ async function testReviewKeys() {
   }
 }
 
+/* ---------------- 3w. 类型与站点筛选 ---------------- */
+
+const filterSeed = (now = Date.now()) => ({
+  clipkeep_items: [
+    { id: "f1", text: "量子纠缠要点", note: "", tags: ["物理"], url: "https://example.com/a", title: "示例文章", createdAt: now - 5000 },
+    { id: "f2", kind: "image", text: "pqc.png", note: "", tags: [], url: "https://example.com/b", title: "示例配图", image: "https://cdn.example.com/pqc.png", createdAt: now - 4000 },
+    { id: "f3", kind: "link", text: "后量子密码迁移时间表", note: "", tags: ["密码"], url: "https://csrc.nist.gov/g", title: "NIST", link: "https://csrc.nist.gov/g", createdAt: now - 3000 },
+    { id: "f4", text: "扩展权限最小化", note: "", tags: [], url: "https://csrc.nist.gov/o", title: "NIST 另一篇", createdAt: now - 2000 },
+    { id: "f5", text: "浏览器存储上限", note: "", tags: [], url: "https://developer.mozilla.org/x", title: "MDN", createdAt: now - 1000 },
+  ],
+});
+
+async function testKindSiteFilter() {
+  console.log("\n[3w] 类型与站点筛选");
+  const GHOST = {
+    hidden: true, textContent: "", value: "", checked: false, dataset: {},
+    classList: { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} },
+    querySelector: () => null, querySelectorAll: () => [], dispatchEvent: () => false,
+  };
+  const open = async (seed) => {
+    const p = await mountPopup(seed);
+    const $ = (id) => p.$(id) || GHOST;
+    const kinds = () => p.qa('#filterbar [data-kind]');
+    const sites = () => p.qa('#filterbar [data-site]');
+    const rows = () => p.qa("#list .item");
+    const texts = () => p.qa("#list .item .item-text, #list .item h3").map((n) => n.textContent.trim());
+    const ids = () => p.qa("#list .item").map((n) => n.dataset.id);
+    const byKind = (k) => kinds().find((c) => c.dataset.kind === k) || GHOST;
+    const bySite = (s) => sites().find((c) => c.dataset.site === s) || GHOST;
+    return { ...p, $, kinds, sites, rows, texts, ids, byKind, bySite };
+  };
+
+  /* 没有可筛的维度时，别摆一排空控件骗人 */
+  {
+    const p = await open(batchSeed(["苹果派做法", "香蕉奶昔"]));
+    ok("纯文字库不显示筛选条", p.$("filterbar").hidden === true, "只有一种类型、一个站点时筛选条没意义");
+  }
+
+  /* 类型 chip 只列库里真有的类型，数量对得上 */
+  {
+    const p = await open(filterSeed());
+    ok("混合类型库显示筛选条", p.$("filterbar").hidden === false);
+    eq("类型 chip 只列实际存在的三种", p.kinds().length, 3);
+    ok("有「文字」筛选", p.kinds().some((c) => c.dataset.kind === "text"));
+    ok("有「图片」筛选", p.kinds().some((c) => c.dataset.kind === "image"));
+    ok("有「链接」筛选", p.kinds().some((c) => c.dataset.kind === "link"));
+    ok("库里没有的类型不出现", !p.kinds().some((c) => c.dataset.kind === "video"));
+  }
+
+  /* 点类型 → 只剩那一类；再点一次取消 */
+  {
+    const p = await open(filterSeed());
+    await p.click(p.byKind("image"));
+    eq("筛图片只剩一条", p.rows().length, 1);
+    eq("留下的是那条图片收藏", p.ids()[0], "f2");
+    ok("选中的类型 chip 有 active 态", p.byKind("image").classList.contains("active"));
+    await p.click(p.byKind("image"));
+    eq("再点一次取消筛选", p.rows().length, 5);
+    ok("取消后不再有 active 类型", !p.kinds().some((c) => c.classList.contains("active")));
+  }
+
+  /* 站点 chip：按域名聚合，点它只看这个站 */
+  {
+    const p = await open(filterSeed());
+    ok("站点 chip 存在", p.sites().length > 0);
+    ok("站点 chip 显示域名", p.sites().some((c) => c.dataset.site === "csrc.nist.gov"));
+    await p.click(p.bySite("csrc.nist.gov"));
+    eq("筛站点只剩该站的两条", p.rows().length, 2);
+    eq("留下的正是那两条 NIST 收藏", p.ids().slice().sort().join(","), "f3,f4");
+  }
+
+  /* 类型 + 站点 + 标签 + 搜索 四重叠加，取交集而不是并集 */
+  {
+    const p = await open(filterSeed());
+    await p.click(p.bySite("csrc.nist.gov"));
+    await p.click(p.byKind("link"));
+    eq("站点 + 类型取交集", p.rows().length, 1);
+    const tag = p.qa("#tags .chip").find((c) => c.dataset.tag === "密码");
+    await p.click(tag);
+    eq("再叠加标签仍是交集", p.rows().length, 1);
+    p.$("search").value = "不存在的关键词";
+    await p.fire(p.$("search"), "input");
+    eq("搜索不命中时为空", p.rows().length, 0);
+  }
+
+  /* 筛选状态必须跟着批量「全选」：选中的就是看到的那一批 */
+  {
+    const p = await open(filterSeed());
+    await p.click(p.byKind("image"));
+    eq("筛到只剩一条", p.rows().length, 1);
+    await p.click(p.$("btn-batch-all"));
+    eq("全选只选到筛选结果", p.$("batch-text").textContent, "已选 1 条");
+    await p.click(p.byKind("link"));
+    await p.click(p.$("btn-batch-all"));
+    eq("换筛选后全选跟着变", p.$("batch-text").textContent, "已选 1 条");
+  }
+
+  /* 筛到空：提示要说「筛选没命中」，不能骗人说「还没有收藏」 */
+  {
+    const p = await open(filterSeed());
+    await p.click(p.bySite("developer.mozilla.org"));
+    await p.click(p.byKind("image"));
+    eq("确实筛空了", p.rows().length, 0);
+    const tip = p.$("empty").textContent;
+    ok("空态说明是筛选导致", /筛选/.test(tip), tip);
+    ok("空态不谎称还没有收藏", !/还没有收藏/.test(tip), tip);
+  }
+
+  /* 数据变了不能留幽灵筛选：库里没图片了，图片筛选要自动失效 */
+  {
+    const p = await open(filterSeed());
+    await p.click(p.byKind("image"));
+    eq("先筛到图片", p.rows().length, 1);
+    await p.be.send({ type: "clipkeep:delete", id: "f2" });
+    await p.be.send({ type: "clipkeep:storage-changed" }).catch(() => {});
+    await p.fire(p.$("search"), "input"); // 触发一次重绘，模拟列表刷新
+    await tick(20);
+    const stillHasImage = (p.store.clipkeep_items || []).some((it) => it.kind === "image");
+    ok("库里已经没有图片", !stillHasImage);
+    ok("类型 chip 不再列出已不存在的类型", !p.kinds().some((c) => c.dataset.kind === "image"),
+       "留着就是点得动却永远筛不出东西的幽灵选项");
+  }
+
+  /* 站点 chip 要有渲染上限，别把几百个域名铺成一堵墙 */
+  {
+    const many = { clipkeep_items: Array.from({ length: 120 }, (_, i) => ({
+      id: "s" + i, text: "内容" + i, note: "", tags: [],
+      url: `https://site${i}.example.com/p`, title: "T" + i, createdAt: Date.now() - i * 1000,
+    })) };
+    const p = await open(many);
+    ok("站点 chip 有上限", p.sites().length <= 12, "实际 " + p.sites().length);
+    ok("上限之外如实告知", p.$("filterbar").textContent.includes("+") || p.sites().length === 12);
+  }
+
+  /* 站点名来自外部数据：带引号也不能突破属性 */
+  {
+    const evil = { clipkeep_items: [
+      { id: "e1", text: "正常", note: "", tags: [], url: 'https://x.example.com/"onmouseover="alert(1)', title: "T", createdAt: Date.now() },
+      { id: "e2", text: "另一条", note: "", tags: [], url: "https://y.example.com/p", title: "U", createdAt: Date.now() - 1 },
+      { id: "e3", kind: "link", text: "第三条", note: "", tags: [], url: "https://z.example.com/p", title: "V", link: "https://z.example.com/p", createdAt: Date.now() - 2 },
+    ] };
+    const p = await open(evil);
+    ok("站点 chip 没有注入事件属性", p.w.document.querySelector("[onmouseover]") === null);
+    ok("chip 的 data-site 是转义后的安全值",
+       p.sites().every((c) => !/["]/.test(c.getAttribute("data-site") || "")));
+  }
+
+  /* 切视图不能串台：高亮视图没有这套筛选 */
+  {
+    const p = await open(filterSeed());
+    await p.click(p.byKind("image"));
+    await p.click(p.q('.tab[data-view="marks"]'));
+    ok("高亮视图隐藏收藏筛选条", p.$("filterbar").hidden === true);
+    await p.click(p.q('.tab[data-view="clips"]'));
+    ok("切回收藏视图筛选还在", p.rows().length === 1, "用户没理由被悄悄清掉筛选");
+  }
+}
+
+/* ---------------- 3v. v1.8：列表键盘流与快捷键帮助 ---------------- */
+
+async function testListKeys() {
+  console.log("\n[3v] 列表键盘流与快捷键帮助");
+  const GHOST = {
+    hidden: true, textContent: "", value: "", checked: false, dataset: {},
+    classList: { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} },
+    querySelector: () => null, querySelectorAll: () => [], dispatchEvent: () => false,
+  };
+  const LONG = "开头。".padEnd(300, "字"); // 超过 CLAMP_AT=240，默认折叠
+  const seed = (texts) => ({
+    clipkeep_items: texts.map((t, i) => ({
+      id: "k" + (i + 1), text: t, note: "", tags: [], url: "http://x/" + (i + 1),
+      title: "来源" + (i + 1), createdAt: Date.now() - i * 1000,
+    })),
+  });
+  const open = async (texts) => {
+    const p = await mountPopup(seed(texts || ["第一条", "第二条", "第三条"]));
+    const $ = (id) => p.$(id) || GHOST;
+    const rows = () => p.qa("#list .item");
+    const focused = () => p.qa("#list .item.focused");
+    const fIndex = () => focused().length === 1 ? rows().indexOf(focused()[0]) : -1;
+    const boxes = () => p.qa('#list .item input[data-act="sel"]');
+    const press = async (key, target) => {
+      const ev = new p.w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      (target || p.w.document).dispatchEvent(ev);
+      await tick(20);
+      return ev;
+    };
+    const tab = async (v) => { await p.click(p.q(`.tab[data-view="${v}"]`)); };
+    return { ...p, $, rows, focused, fIndex, boxes, press, tab };
+  };
+
+  /* 方向键移动焦点：有高亮行、不越界、不跟着滚页面 */
+  {
+    const p = await open();
+    eq("初始没有焦点行", p.focused().length, 0);
+    await p.press("ArrowDown");
+    eq("下键聚焦第一行", p.fIndex(), 0);
+    await p.press("ArrowDown");
+    eq("再按一次移到第二行", p.fIndex(), 1);
+    await p.press("ArrowUp");
+    eq("上键退回第一行", p.fIndex(), 0);
+    await p.press("ArrowUp");
+    eq("最上面不按出负数", p.fIndex(), 0);
+    for (let i = 0; i < 9; i++) await p.press("ArrowDown");
+    eq("按到底停在最后一行", p.fIndex(), 2);
+    eq("焦点始终只有一个", p.focused().length, 1);
+    const ev = await p.press("ArrowDown");
+    ok("方向键拦掉默认滚动", ev.defaultPrevented);
+  }
+
+  /* 键盘勾选：x 就是点那条的复选框 */
+  {
+    const p = await open();
+    await p.press("ArrowDown");
+    await p.press("ArrowDown");
+    await p.press("x");
+    eq("x 勾上焦点行", p.$("batch-text").textContent, "已选 1 条");
+    ok("复选框真的勾上了", p.boxes()[1].checked);
+    await p.press("x");
+    ok("再按取消勾选", p.$("batchbar").hidden === true);
+    await p.press("ArrowUp");
+    await p.press("x");
+    eq("勾选跟着焦点走", p.$("batch-text").textContent, "已选 1 条");
+    ok("勾的是焦点所在的行", p.boxes()[0].checked);
+  }
+
+  /* Enter 展开/收起长文本，短收藏不乱动 */
+  {
+    const p = await open([LONG, "短句收藏"]);
+    await p.press("ArrowDown");
+    const row = () => p.rows()[0];
+    ok("长收藏默认折叠", row().querySelector(".item-text").classList.contains("is-clamped"));
+    await p.press("Enter");
+    ok("Enter 展开全文", !row().querySelector(".item-text").classList.contains("is-clamped"));
+    await p.press("Enter");
+    ok("再按收回", row().querySelector(".item-text").classList.contains("is-clamped"));
+    await p.press("ArrowDown");
+    const before = p.rows().length;
+    await p.press("Enter");
+    eq("短收藏按 Enter 不惹事", p.rows().length, before);
+  }
+
+  /* 焦点要跟着筛选走：筛掉的那条不能留着高亮 */
+  {
+    const p = await open();
+    await p.press("ArrowDown");
+    await p.press("ArrowDown");
+    eq("先聚焦第二条", p.fIndex(), 1);
+    p.$("search").value = "第三条";
+    await p.fire(p.$("search"), "input");
+    ok("焦点条目被筛掉后不留幽灵高亮", p.focused().length === 0);
+    await p.press("ArrowDown");
+    eq("重新按方向键落到当前结果上", (p.focused()[0] || GHOST).dataset.id, "k3");
+  }
+
+  /* 帮助浮层：? 开关，鼠标也有入口，打开时别的键归它 */
+  {
+    const p = await open();
+    ok("帮助默认关着", p.$("keys-help").hidden === true);
+    await p.press("?");
+    ok("? 打开快捷键帮助", p.$("keys-help").hidden === false);
+    const txt = p.$("keys-help").textContent;
+    ok("帮助列出方向键", /↑|↓|Arrow/.test(txt), txt.slice(0, 60));
+    ok("帮助列出勾选键 x", /\bx\b/.test(txt));
+    ok("帮助列出回顾打分键", /空格/.test(txt) && /[123]/.test(txt));
+    ok("帮助列出秒存快捷键", /Alt\s*\+\s*Shift\s*\+\s*K/i.test(txt));
+    await p.press("ArrowDown");
+    await p.press("x");
+    ok("浮层开着时不吃列表按键", p.$("batchbar").hidden === true);
+    await p.press("Escape");
+    ok("Esc 关闭浮层", p.$("keys-help").hidden === true);
+    await p.press("?");
+    ok("? 又能打开", p.$("keys-help").hidden === false);
+    await p.press("?");
+    ok("? 再按一次也能关", p.$("keys-help").hidden === true);
+    await p.click(p.$("btn-keys"));
+    ok("头部按钮打开同一个浮层", p.$("keys-help").hidden === false);
+    await p.click(p.q('#keys-help [data-act="close"]'));
+    ok("浮层里的关闭按钮管用", p.$("keys-help").hidden === true);
+  }
+
+  /* 打字优先：输入框里的按键不该被当成快捷键 */
+  {
+    const p = await open();
+    await p.press("ArrowDown", p.$("search"));
+    eq("搜索框里按方向键不移动焦点", p.focused().length, 0);
+    await p.press("x", p.$("search"));
+    ok("搜索框里打 x 不勾选", p.$("batchbar").hidden === true);
+    await p.press("?", p.$("search"));
+    ok("输入框里打 ? 不弹浮层", p.$("keys-help").hidden === true);
+    await p.press("ArrowDown");
+    eq("失焦后快捷键照常", p.fIndex(), 0);
+  }
+
+  /* 不串台：高亮 / 回顾视图有自己的键位 */
+  {
+    const p = await open();
+    await p.tab("marks");
+    await p.press("ArrowDown");
+    await p.press("x");
+    ok("高亮视图不吃列表快捷键", p.qa("#list .item.focused").length === 0);
+    await p.tab("clips");
+    await p.press("ArrowDown");
+    eq("切回收藏视图焦点能用", p.fIndex(), 0);
+  }
+
+  /* 样式：焦点必须看得见，否则「按了哪条」全靠猜 */
+  {
+    const css = src("popup.css");
+    ok("焦点行有可见样式", /\.item\.focused\s*\{/.test(css));
+    ok("帮助浮层有样式", /\.keys-help\s*\{/.test(css));
+    const html = src("popup.html");
+    ok("popup 里有帮助浮层容器", /id="keys-help"/.test(html));
+    ok("popup 里有快捷键按钮", /id="btn-keys"/.test(html));
+  }
+}
+
 /* ---------------- 3z. v1.7 审计：批量与键盘的提示诚实性 ---------------- */
 
 async function testV17Audit() {
@@ -2807,7 +3124,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testV17Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testV17Audit, testManifests];
   for (const s of suites) {
     try {
       await s();
