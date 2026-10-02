@@ -114,10 +114,23 @@ async function restoreEntry(entry) {
   return { ok: true };
 }
 
-function normalizeTags(tags) {
-  if (!tags) return [];
+const TAG_MAX = 12; // 单条收藏的标签上限
+
+/**
+ * 标签清洗：去重去空，并夹到 TAG_MAX 个。
+ * 上限要夹（否则一条能塞几百个标签），但夹掉几条得让调用方说得出——
+ * 只悄悄留 12 个的话，弹窗报「已加标签」，用户看到的却是三个没进去。
+ */
+function cleanTags(tags) {
+  if (!tags) return { tags: [], dropped: 0 };
   const arr = Array.isArray(tags) ? tags : String(tags).split(/[,，\s]+/);
-  return [...new Set(arr.map((t) => String(t).trim()).filter(Boolean))].slice(0, 12);
+  const all = [...new Set(arr.map((t) => String(t).trim()).filter(Boolean))];
+  const keep = all.slice(0, TAG_MAX);
+  return { tags: keep, dropped: all.length - keep.length };
+}
+
+function normalizeTags(tags) {
+  return cleanTags(tags).tags;
 }
 
 /**
@@ -184,14 +197,16 @@ function cleanItem(raw) {
   const item = {
     id: SAFE_ID.test(rawId) ? rawId : makeId(),
     text: text.slice(0, MAX_TEXT),
-    note: String(raw.note === undefined || raw.note === null ? "" : raw.note),
+    note: String(raw.note === undefined || raw.note === null ? "" : raw.note).trim().slice(0, MAX_TEXT),
     tags: normalizeTags(raw.tags),
     url: String(raw.url || ""),
     title: String(raw.title || ""),
     createdAt: Number(raw.createdAt) || Date.now(),
     ...mediaOf(raw),
   };
-  if (item.text.length > MAX_TEXT) item.truncated = true;
+  // 截断标记要在切片之前量：slice 之后再比长度永远是 false，
+  // 一条被砍掉一半的收藏就不可能带「已截断」徽标了
+  if (text.length > MAX_TEXT) item.truncated = true;
   const review = cleanReview(raw.review);
   if (review) item.review = review;
   return item;
@@ -228,23 +243,26 @@ function sameAs(a, b) {
 function addItem(payload) {
   const raw = ((payload && payload.text) || "").trim();
   if (!raw) return Promise.resolve({ ok: false, error: "empty" });
+  const ct = cleanTags(payload && payload.tags);
   const item = {
     id: makeId(),
     text: raw.slice(0, MAX_TEXT),
-    note: ((payload && payload.note) || "").trim(),
-    tags: normalizeTags(payload && payload.tags),
+    note: ((payload && payload.note) || "").trim().slice(0, MAX_TEXT),
+    tags: ct.tags,
     url: (payload && payload.url) || "",
     title: (payload && payload.title) || "",
     createdAt: Date.now(),
     ...mediaOf(payload || {}),
   };
   if (raw.length > MAX_TEXT) item.truncated = true;
+  // 标签超上限时把舍弃条数带出去：前台要如实说「有 3 个标签没存进去」
+  const dropped = ct.dropped ? { tagDropped: ct.dropped } : {};
   return mutate((items) => {
     const dup = items.find((it) => it && sameAs(it, item));
     // 划两次就把同一个句子存两遍，是这类工具最常见的误操作
-    if (dup) return { result: { ok: true, dup: true, item: dup, count: items.length } };
+    if (dup) return { result: { ok: true, dup: true, item: dup, count: items.length, ...dropped } };
     items.unshift(item);
-    return { write: true, items, result: { ok: true, item, count: items.length } };
+    return { write: true, items, result: { ok: true, item, count: items.length, ...dropped } };
   });
 }
 
@@ -277,7 +295,14 @@ function updateItem(id, patch) {
     const src = patch || {};
     const p = {}; // 白名单取字段：改个标签不该顺手改掉收藏时间、截断标记或塞进未知字段
     for (const k of UPDATABLE) if (src[k] !== undefined) p[k] = src[k];
-    if (p.tags !== undefined) p.tags = normalizeTags(p.tags);
+    let tagDropped = 0;
+    if (p.tags !== undefined) {
+      const ct = cleanTags(p.tags);
+      p.tags = ct.tags;
+      tagDropped = ct.dropped; // 夹掉的条数只带在结果里，不进存储
+    }
+    if (p.note !== undefined) p.note = String(p.note).trim().slice(0, MAX_TEXT); // 备注和正文一样要夹：一条超长备注能把配额吃光
+    if (p.note !== undefined) p.note = String(p.note).trim().slice(0, MAX_TEXT); // 备注同样夹上限，一条能撑爆配额
     if (p.review !== undefined) {
       const rv = cleanReview(p.review); // 排期由后台复盘一遍，盒号/时间越界就夹回来
       if (rv) p.review = rv;
@@ -298,7 +323,11 @@ function updateItem(id, patch) {
       delete items[idx].kind; delete items[idx].image; delete items[idx].link;
       Object.assign(items[idx], media);
     }
-    return { write: true, items, result: { ok: true, item: items[idx] } };
+    return {
+      write: true,
+      items,
+      result: { ok: true, item: items[idx], ...(tagDropped ? { tagDropped } : {}) },
+    };
   });
 }
 
@@ -336,14 +365,22 @@ function tagAddMany(ids, tags) {
   return mutate((items) => {
     const want = new Set(q.ids);
     let changed = 0;
+    let dropped = 0; // 合并后超过 12 个被舍弃的标签条数
     const next = items.map((it) => {
       if (!it || !want.has(it.id)) return it;
-      const merged = normalizeTags((it.tags || []).concat(add));
-      if (merged.join("\n") === (it.tags || []).join("\n")) return it;
+      const merged = cleanTags((it.tags || []).concat(add));
+      dropped += merged.dropped;
+      if (merged.tags.join("\n") === (it.tags || []).join("\n")) return it;
       changed++;
-      return { ...it, tags: merged };
+      return { ...it, tags: merged.tags };
     });
-    return { write: changed > 0, items: next, result: { ok: true, changed, limited: q.limited } };
+    // changed 为 0 但 dropped 不为 0：一个标签都没加上，全被上限挡在外面，
+    // 这时候报「标签没有变化」等于告诉用户「本来就有」
+    return {
+      write: changed > 0,
+      items: next,
+      result: { ok: true, changed, dropped, limited: q.limited },
+    };
   });
 }
 
@@ -436,8 +473,8 @@ function cleanHighlight(payload) {
     id: SAFE_ID.test(rawId) ? rawId : makeId(),
     url,
     title: String(p.title || ""),
-    text,
-    note: String(p.note || ""),
+    text: text.slice(0, MAX_TEXT),
+    note: String(p.note || "").trim().slice(0, MAX_TEXT),
     color: HL_COLORS.indexOf(p.color) >= 0 ? p.color : "yellow",
     createdAt: Number(p.createdAt) || Date.now(),
   };
@@ -458,7 +495,7 @@ function addHighlight(payload) {
 function updateHighlight(id, patch) {
   const p = patch || {};
   const allowed = {};
-  if (p.note !== undefined) allowed.note = String(p.note);
+  if (p.note !== undefined) allowed.note = String(p.note).trim().slice(0, MAX_TEXT);
   if (p.color !== undefined && HL_COLORS.indexOf(p.color) >= 0) allowed.color = p.color;
   if (p.title !== undefined) allowed.title = String(p.title);
   if (!Object.keys(allowed).length) return Promise.resolve({ ok: false, error: "empty" });
@@ -596,8 +633,13 @@ function replaceAll(payload) {
     const next = preserveSince(items, clean, payload && payload.takenAt)
       .slice()
       .sort((a, b) => ((b && b.createdAt) || 0) - ((a && a.createdAt) || 0));
-    return { write: true, items: next, result: { ok: true, count: next.length } };
+    return { write: true, items: next, result: { ok: true, count: next.length, truncated: countTruncated(clean) } };
   });
+}
+
+/** 这批里有多少条正文被砍过（cleanItem 会打 truncated 标记） */
+function countTruncated(list) {
+  return (list || []).filter((x) => x && x.truncated).length;
 }
 
 /** 同一份备份里也可能自带重复 id，留下先出现的那条 */
@@ -634,7 +676,9 @@ function mergeItems(payload) {
     return {
       write: add.length > 0,
       items,
-      result: { ok: true, added: add.length, count: items.length },
+      // 截断条数要报出来：备份里超过上限的正文是悄悄砍短的，
+      // 恢复完只说「已恢复 N 条」，用户会以为备份原样回来了
+      result: { ok: true, added: add.length, count: items.length, truncated: countTruncated(add) },
     };
   });
 }

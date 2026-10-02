@@ -13,6 +13,7 @@
   const ACTIVITY_KEY = "clipkeep_activity"; // 每天回顾了多少条，画热力图用
   const MAX_TEXT = 20000; // 与后台收藏写入的截断上限一致，标记时要说同一个数
   const BATCH_MAX = 1000; // 与后台 cleanIds 的单次批量上限一致，提示时要说同一个数
+  const TAG_MAX = 12; // 与后台 cleanTags 的标签上限一致，提示时要说同一个数
   const CLAMP_AT = 240; // 超过这个长度的收藏在列表里默认折叠
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
@@ -904,9 +905,11 @@
         return `<li>${it ? esc(label) : `<span class="muted">${esc(label)}</span>`}</li>`;
       })
       .join("");
-    // 明细最多存 100 条，手改过的记录可能有几百个 id：全渲染会把回顾页撑死
-    const overflow = a.ids.length > listed.length
-      ? `<p class="heat-day-note">仅显示前 ${listed.length} 条，另有 +${a.ids.length - listed.length} 条未列出。</p>`
+    // 明细最多存 100 条，标题的 n 却照实累计：拿 ids 长度比 ids 长度永远相等，
+    // 差额得从 n 里算，否则「复习 105 条」只列 100 行还不说明为什么
+    const missing = a.n - listed.length;
+    const overflow = missing > 0
+      ? `<p class="heat-day-note">仅显示最近 ${listed.length} 条，另有 ${missing} 条未列出。</p>`
       : "";
     const note = a.ids.length
       ? ""
@@ -1177,8 +1180,17 @@
       await load();
       if (!res || !res.ok) return toast("批量加标签失败，请重试");
       const n = Number(res.changed) || 0;
+      const drop = Number(res.dropped) || 0;
       // 一次处理不完就说清楚，别报「已给 N 条加标签」让用户以为整批都改完了
       if (res.limited && !n) return toast(`一次最多处理 ${BATCH_MAX} 条，请分批再选`);
+      // 上限 12 个：一个都没加上时不能说「没有变化」（那是「本来就有」的意思），
+      // 加上一部分也要说清有几个被挡在门外
+      if (drop) {
+        toast(n
+          ? `已给 ${n} 条加标签，另有 ${drop} 个标签超上限（每条最多 ${TAG_MAX} 个）没存进去`
+          : `${drop} 个标签超上限没存进去（每条最多 ${TAG_MAX} 个）`);
+        return;
+      }
       toast(res.limited
         ? `已给 ${n} 条加标签（单次上限 ${BATCH_MAX} 条），剩下的请再选一批`
         : n ? `已给 ${n} 条加标签` : "标签没有变化");
@@ -1223,7 +1235,11 @@
       await withLock(async () => {
         const res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { tags: val } });
         await load();
-        toast(res && res.ok ? "标签已更新" : "保存失败，请重试");
+        // 每条最多 TAG_MAX 个标签，超出的会被后台舍弃：只说「标签已更新」听不出少了几
+        const drop = res && Number(res.tagDropped) || 0;
+        toast(res && res.ok
+          ? (drop ? `标签已更新，${drop} 个超上限（最多 ${TAG_MAX} 个）没存进去` : "标签已更新")
+          : "保存失败，请重试");
       });
     } else if (act === "export") {
       download(mdOf([it]), `clipkeep-${it.id}.md`);
@@ -1505,6 +1521,12 @@
     pendingRestore = null;
   }
 
+  /** 正文超过 MAX_TEXT 会被后台砍短：恢复类提示要顺口带一句，别让用户以为备份原样回来了 */
+  function truncNote(n) {
+    const k = Number(n) || 0;
+    return k ? `（${k} 条正文过长，已截断到 ${MAX_TEXT} 字）` : "";
+  }
+
   /** 两类内容都交给后台串行写；takenAt 让「覆盖」只作用于弹窗看到的那份快照 */
   async function writeBoth(itemsArr, hlArr, takenAt) {
     const iRes = await API.runtime.sendMessage({ type: "clipkeep:replace", payload: { items: itemsArr, takenAt } });
@@ -1515,6 +1537,7 @@
       hlOk: !!(hRes && hRes.ok),
       items: iRes && iRes.ok ? iRes.count : 0,
       hl: hRes && hRes.ok ? hRes.count : 0,
+      truncated: iRes && iRes.ok ? Number(iRes.truncated) || 0 : 0,
     };
   }
 
@@ -1536,7 +1559,7 @@
     }
     closeRestoreModal();
     await load();
-    toast(`已合并：新增 ${res.added} 收藏 · ${hlAdded} 高亮`);
+    toast(`已合并：新增 ${res.added} 收藏 · ${hlAdded} 高亮${truncNote(res.truncated)}`);
   });
   $("modal-alt").addEventListener("click", async () => {
     if (!pendingRestore) return;
@@ -1554,7 +1577,7 @@
       toast(`覆盖失败：${bad}没有写入成功，本地内容未变，请重试`);
       return;
     }
-    toast(`已用备份覆盖：共 ${written.items} 收藏 · ${written.hl} 高亮`);
+    toast(`已用备份覆盖：共 ${written.items} 收藏 · ${written.hl} 高亮${truncNote(written.truncated)}`);
   });
 
   $("btn-backup").addEventListener("click", backup);

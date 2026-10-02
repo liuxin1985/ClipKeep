@@ -2129,7 +2129,7 @@ async function testV16Audit() {
     await p.click(cell);
     const rows = p.qa("#heat-day .heat-day-list li");
     ok("明细渲染有条数上限", rows.length > 0 && rows.length <= 100, `rows=${rows.length}`);
-    ok("上限之外说明还有多少", /\+\s*60/.test(p.$("heat-day").textContent), p.$("heat-day").textContent);
+    ok("上限之外说明还有多少", /另有 60 条未列出/.test(p.$("heat-day").textContent), p.$("heat-day").textContent);
   }
 }
 
@@ -3547,6 +3547,12 @@ async function testV18Audit() {
 async function testV19Audit() {
   console.log("\n[3v9] v1.9 审计复核：写失败不留半更新 / 计数与上限不说谎");
   const now = Date.now();
+  // 热力图的日期键按本地日切，测试要拿到「今天」那一格必须自己算
+  const dayKey = (ms) => {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
   const mk = (id, text, extra) => ({
     id, text, note: "", tags: [], url: "http://x/1", title: "页面", createdAt: now - 1000, ...(extra || {}),
   });
@@ -3649,6 +3655,123 @@ async function testV19Audit() {
     await p.click(p.q('[data-act="grade"][data-g="1"]'));
     await tick(40);
     ok("排期存了但打卡没写进去时如实说明", /打卡|热力图/.test(p.$("toast").textContent), p.$("toast").textContent);
+  }
+
+  /* 6. 标签上限 12 个：舍弃了几条要说出来，更不能报「标签没有变化」 */
+  {
+    const be = makeBackend();
+    const many = Array.from({ length: 15 }, (_, i) => "t" + i).join(",");
+    const res = await be.send({ type: "clipkeep:add", payload: { text: "标签超限", url: "http://a/x", title: "T", tags: many } });
+    await tick(20);
+    eq("标签仍然只留 12 个", res.item.tags.length, 12);
+    eq("后台报出被舍弃的个数", res.tagDropped, 3);
+  }
+  {
+    const be = makeBackend();
+    const twelve = Array.from({ length: 12 }, (_, i) => "a" + i);
+    const add = await be.send({ type: "clipkeep:add", payload: { text: "已经满了", url: "http://a/x", title: "T", tags: twelve } });
+    const r = await be.send({ type: "clipkeep:tag-add-many", ids: [add.item.id], tags: "b1,b2,b3" });
+    await tick(20);
+    ok("一条标签都加不上时不能报「没有变化」", r.dropped === 3, JSON.stringify(r));
+    ok("changed 如实为 0", r.changed === 0, JSON.stringify(r));
+  }
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("t1", "有标签的收藏")] });
+    await p.click(p.q('.item input[data-act="sel"]'));
+    await tick(10);
+    stubOne(p.chrome, "clipkeep:tag-add-many", { ok: true, changed: 0, dropped: 3, limited: false });
+    p.w.prompt = () => "b1, b2, b3";
+    await p.click(p.$("btn-batch-tag"));
+    await tick(40);
+    const t = p.$("toast").textContent;
+    ok("标签一个都没加上时不说「没有变化」", !/没有变化/.test(t), t);
+    ok("说出被舍弃了几条", /3/.test(t) && /上限|舍弃/.test(t), t);
+  }
+
+  /* 7. 备注与高亮正文同样要有上限：一条超长记录能把本地配额吃光 */
+  {
+    const be = makeBackend();
+    const res = await be.send({ type: "clipkeep:add", payload: { text: "正文", note: "注".repeat(30000), url: "http://a/x", title: "T" } });
+    await tick(20);
+    ok("备注被夹到上限内", res.item.note.length <= 20000, String(res.item.note.length));
+  }
+  {
+    const be = makeBackend();
+    await be.send({ type: "clipkeep:hl-add", payload: { url: "http://a/x", text: "量".repeat(30000), note: "批".repeat(30000) } });
+    await tick(20);
+    const h = (be.store.clipkeep_highlights || [])[0] || {};
+    ok("高亮正文有上限", String(h.text || "").length <= 20000, String((h.text || "").length));
+    ok("高亮批注有上限", String(h.note || "").length <= 20000, String((h.note || "").length));
+  }
+  {
+    const be = makeBackend();
+    const add = await be.send({ type: "clipkeep:add", payload: { text: "改备注", url: "http://a/x", title: "T" } });
+    const r = await be.send({ type: "clipkeep:update", id: add.item.id, patch: { note: "x".repeat(30000) } });
+    await tick(20);
+    ok("编辑备注同样夹上限", r.item.note.length <= 20000, String(r.item.note.length));
+  }
+
+  /* 8. 热力图明细：标题说 N 条就得能看出为什么只有 100 行 */
+  {
+    const ids = Array.from({ length: 100 }, (_, i) => "r" + i);
+    const p = await mountPopup({
+      clipkeep_items: ids.map((id) => mk(id, "复习" + id)),
+      clipkeep_activity: { [dayKey(now)]: { n: 105, ids } },
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    const cell = p.qa(".heat i[data-day]").find((c) => c.dataset.day === dayKey(now));
+    await p.click(cell);
+    await tick(20);
+    const head = p.$("heat-day").textContent;
+    ok("明细行数与标题不符时如实说明差额", /另有 5 条|5 条未列出/.test(head), head.slice(-120));
+  }
+
+  /* 9. 导入截断不能无声无息：旧备份 / 手改过的 JSON 同样要标「已截断」 */
+  {
+    const be = makeBackend();
+    const r = await be.send({
+      type: "clipkeep:merge",
+      payload: { items: [{ id: "m1", text: "长".repeat(24000), url: "http://a/x", title: "T", createdAt: 1 }] },
+    });
+    await tick(20);
+    eq("合并确实收下了这条", r.added, 1);
+    eq("入库正文截到上限", (be.store.clipkeep_items[0] || {}).text.length, 20000);
+    ok("被截断的导入要标出来", (be.store.clipkeep_items[0] || {}).truncated === true);
+    eq("合并结果报出截断条数", r.truncated, 1);
+  }
+
+  /* 10. 单条改标签也被 12 个上限挡：后台报舍弃数，弹窗照着说 */
+  {
+    const be = makeBackend();
+    const add = await be.send({ type: "clipkeep:add", payload: { text: "改标签", url: "http://a/x", title: "T" } });
+    const many = Array.from({ length: 15 }, (_, i) => "t" + i).join(",");
+    const r = await be.send({ type: "clipkeep:update", id: add.item.id, patch: { tags: many } });
+    await tick(20);
+    eq("编辑后仍然只留 12 个", r.item.tags.length, 12);
+    eq("编辑同样报出舍弃数", r.tagDropped, 3);
+  }
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("t1", "改标签")] });
+    stubOne(p.chrome, "clipkeep:update", { ok: true, tagDropped: 3, item: mk("t1", "改标签", { tags: ["a"] }) });
+    p.w.prompt = () => "a,b,c";
+    await p.click(p.q('.item [data-act="tag"]'));
+    await tick(40);
+    const t = p.$("toast").textContent;
+    ok("单条改标签被上限挡住时如实说明", /3/.test(t) && /上限/.test(t), t);
+  }
+
+  /* 11. 恢复备份把正文砍短时，提示里要说一声 */
+  {
+    const p = await mountPopup();
+    await p.putBackup({
+      app: "ClipKeep", version: 1,
+      items: [{ id: "n1", text: "长".repeat(24000), note: "", tags: [], url: "", title: "", createdAt: now - 5000 }],
+    });
+    await p.click(p.$("modal-ok"));
+    await tick(40);
+    const t = p.$("toast").textContent;
+    ok("合并提示带出被截断的条数", /截断/.test(t), t);
   }
 }
 
