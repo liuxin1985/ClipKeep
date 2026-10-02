@@ -384,6 +384,24 @@
     return marks.length;
   }
 
+  /**
+   * 一条高亮在页面上可能是好几个标记：和别的高亮重叠时，它会被区间边界切成几段，
+   * 交集那段还要把别人套在里面。所以删掉/改批注都要按 id 找到全部片段一起处理，
+   * 只动眼前这一个标记会留下半条颜色或半条批注。
+   */
+  function marksFor(id) {
+    if (!id) return [];
+    return [...document.querySelectorAll("." + NS + "-hl")].filter((m) => m.dataset.hlid === id);
+  }
+
+  /** 撤掉某条高亮的全部片段，外层的先拆（拆外层不会把内层摘走，只会让它往上挪一层） */
+  function unwrapMarksFor(id) {
+    const list = marksFor(id);
+    list.forEach(unwrapMark);
+    if (list.length && document.body && document.body.normalize) document.body.normalize();
+    return list.length;
+  }
+
   function openNoteForRange(sel) {
     if (!sel || !sel.range) {
       toast("请先选中文字");
@@ -407,12 +425,30 @@
     };
   }
 
-  // 在文本节点内从 idx 起包裹 len 个字符（用于刷新后重放高亮）
-  function wrapAt(node, idx, len, mark) {
-    const range = document.createRange();
-    range.setStart(node, idx);
-    range.setEnd(node, idx + len);
-    wrapRange(range, mark);
+  /** 覆盖同一区间的高亮排序：起点早的是外层，同起点终点晚的是外层，再按写入先后 */
+  function outerFirst(spans) {
+    return spans.slice().sort((a, b) =>
+      a.start - b.start || b.end - a.end || a.hl.createdAt - b.hl.createdAt || (a.hl.id < b.hl.id ? -1 : 1));
+  }
+
+  /**
+   * 把 [a,b) 从 node 里切出来，按 spans 从外到内套成 mark 链再放回原位。
+   * 必须从右往左调用：splitText 会让 node 只留下前缀，左边还没处理的偏移才不会失效。
+   */
+  function wrapSegment(node, a, b, spans) {
+    node.splitText(b); // node 的后半（原 b 之后）成为下一个兄弟节点
+    const mid = node.splitText(a); // node 只剩 [0,a)，mid 正是这一段
+    // 先记住落点：mid 一旦被 appendChild 装进 mark 就离开文档，那时再取 parentNode 已是空的
+    const parent = mid.parentNode;
+    const next = mid.nextSibling;
+    let child = mid;
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const hl = spans[i].hl;
+      const mark = makeMark(hl.id, COLORS[hl.color] || COLORS.yellow, hl.note);
+      mark.appendChild(child);
+      child = mark;
+    }
+    parent.insertBefore(child, next);
   }
 
   async function applyHighlights() {
@@ -436,23 +472,42 @@
     const remaining = mine.slice();
     let node;
     while ((node = walker.nextNode()) && remaining.length) {
-      const hits = [];
+      const spans = [];
       for (let i = 0; i < remaining.length; i++) {
         const idx = node.nodeValue.indexOf(remaining[i].text);
-        if (idx >= 0) hits.push({ idx, hl: remaining[i] });
+        if (idx >= 0) spans.push({ start: idx, end: idx + remaining[i].text.length, hl: remaining[i] });
       }
-      if (!hits.length) continue;
-      // 从后往前包裹：包裹会切碎当前节点，靠后的区间先落地才不会互相踩掉
-      hits.sort((a, b) => b.idx - a.idx);
-      for (const h of hits) {
-        const len = h.hl.text.length;
-        if (h.idx + len > node.nodeValue.length) continue; // 与已落地的区间重叠，留给别的节点
+      if (!spans.length) continue;
+      const full = node.nodeValue.length;
+      // 按所有区间边界把这段文本切开，重叠处各占一段、交集那段两层套在一起。
+      // 旧写法是从后往前整段包裹，一旦区间重叠，先落地那条会缩短 nodeValue，
+      // 后一条的边界判定必然失败而被静默丢掉——重叠的高亮从此不再显示。
+      const cuts = new Set([0, full]);
+      spans.forEach((s) => {
+        cuts.add(Math.max(0, s.start));
+        cuts.add(Math.min(full, s.end));
+      });
+      const pts = [...cuts].sort((a, b) => a - b);
+      const segs = [];
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        if (a >= b) continue;
+        const cover = outerFirst(spans.filter((s) => s.start <= a && s.end >= b));
+        if (cover.length) segs.push({ a, b, cover });
+      }
+      // 从右往左落地：每次切分只影响 node 的后半，靠左的偏移才不会失效
+      segs.sort((x, y) => y.a - x.a);
+      for (const seg of segs) {
         try {
-          wrapAt(node, h.idx, len, makeMark(h.hl.id, COLORS[h.hl.color] || COLORS.yellow, h.hl.note));
+          wrapSegment(node, seg.a, seg.b, seg.cover);
         } catch (_) {
           continue;
         }
-        remaining.splice(remaining.indexOf(h.hl), 1);
+        seg.cover.forEach((s) => {
+          const at = remaining.indexOf(s.hl);
+          if (at >= 0) remaining.splice(at, 1);
+        });
       }
     }
   }
@@ -472,7 +527,7 @@
     const list = await getHighlights();
     if (!list) return;
     const hl = list.find((h) => h.id === id);
-    if (!hl) { unwrapMark(mark); return; } // 存储里已删除：顺手清掉页面上的残留
+    if (!hl) { unwrapMarksFor(id); return; } // 存储里已删除：顺手清掉页面上的残留（可能是好几段）
     const action = prompt(
       "ClipKeep 批注：" + (hl.note || "（无）") + "\n\n输入新批注内容并回车保存；输入 !d 回车删除该高亮。",
       hl.note || ""
@@ -482,21 +537,24 @@
       // 先写存储（进回收站，可撤销），成功后再改页面：失败时标记还在，和存储保持一致
       const r = await hlWrite({ type: "clipkeep:hl-delete", id });
       if (r === "gone") {
-        unwrapMark(mark); // 存储里早没了：清掉残留标记，提示说清去向
+        unwrapMarksFor(id); // 存储里早没了：清掉残留标记，提示说清去向
         toast(GONE_HINT);
       } else if (r) {
-        unwrapMark(mark);
+        unwrapMarksFor(id);
         toast("已删除高亮");
       }
     } else {
       const note = action.trim();
       const r = await hlWrite({ type: "clipkeep:hl-update", id, patch: { note } });
       if (r === "gone") {
-        unwrapMark(mark);
+        unwrapMarksFor(id);
         toast(GONE_HINT);
       } else if (r) {
-        mark.title = note ? "ClipKeep 批注：" + note : "";
-        mark.classList.toggle("has-note", !!note);
+        // 重叠的高亮在页面上是几段，批注要一起改，否则只有点到的那段带新批注
+        marksFor(id).forEach((m) => {
+          m.title = note ? "ClipKeep 批注：" + note : "";
+          m.classList.toggle("has-note", !!note);
+        });
         toast("批注已更新 ✓");
       }
     }

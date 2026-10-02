@@ -2028,8 +2028,17 @@ async function testHeatDrill() {
     ok("明细可以关掉", p.$("heat-day").hidden === true);
     await p.click(p.qa(".heat i").find((c) => c.dataset.day === dk(5)));
     ok("没打卡的格子不展开明细", p.$("heat-day").hidden === true);
-    await p.click(p.qa(".heat i.future")[0]);
-    ok("未来的格子点了没反应", p.$("heat-day").hidden === true);
+    // 热力图固定 8 周，今天所在列之后的格子才是「未来」：本周六跑测试时最后一格就是今天，
+    // 直接取 .future[0] 会拿到 undefined（整个套件每周六崩一次）。按星期几算出应有的格数。
+    const dow = new Date().getDay();
+    const future = p.qa(".heat i.future");
+    eq("未来格子数等于本周还没到的天数", future.length, 6 - dow);
+    if (future.length) {
+      await p.click(future[0]);
+      ok("未来的格子点了没反应", p.$("heat-day").hidden === true);
+    } else {
+      ok("周六最后一格就是今天，没有未来格", p.qa(".heat i").at(-1).dataset.day === dk(0));
+    }
   }
 
   /* 5. 统计口径兼容两种记录格式 */
@@ -3070,6 +3079,87 @@ async function testV17Audit() {
   }
 }
 
+/* ---------------- 3s. 重叠高亮：嵌套与部分交叠 ---------------- */
+
+async function testOverlappingMarks() {
+  console.log("\n[3s] 重叠高亮：嵌套、部分交叠、逐段撤销");
+  const now = Date.now();
+  const url = "http://localhost/ov";
+  const H = (id, text, color, extra) => ({
+    id, url, text, color: color || "yellow", note: "", createdAt: now, ...(extra || {}),
+  });
+  const body = `<p>简介：量子比特可以同时处于两种状态，这是并行性的来源。</p>`;
+  const full = "简介：量子比特可以同时处于两种状态，这是并行性的来源。";
+  const of = (c, id) => c.marks().filter((m) => m.dataset.hlid === id);
+
+  /* 1. 一条套在另一条里面：两条的文字都要完整露出来，内层得在外层里面 */
+  {
+    const c = mountContent(url, [H("o1", "可以同时处于两种状态"), H("o2", "处于两种", "pink")], body);
+    await tick(30);
+    eq("外层文字完整", of(c, "o1").map((m) => m.textContent).join(""), "可以同时处于两种状态");
+    eq("内层文字完整", of(c, "o2").map((m) => m.textContent).join(""), "处于两种");
+    ok("内层套在外层里", of(c, "o2").every((i) => of(c, "o1").some((o) => o.contains(i))),
+      c.w.document.querySelector("article p").innerHTML);
+    ok("原文一字不差", c.bodyText() === full, c.bodyText());
+  }
+
+  /* 2. 只是部分交叠：两条各自完整，交集处两层标记都在 */
+  {
+    const c = mountContent(url, [H("p1", "量子比特可以同时"), H("p2", "同时处于两种状态", "green")], body);
+    await tick(30);
+    eq("前一条文字完整", of(c, "p1").map((m) => m.textContent).join(""), "量子比特可以同时");
+    eq("后一条文字完整", of(c, "p2").map((m) => m.textContent).join(""), "同时处于两种状态");
+    ok("交集处两层标记同时生效",
+      c.marks().some((a) => c.marks().some((b) => b !== a && a.dataset.hlid !== b.dataset.hlid && a.contains(b))));
+    ok("原文一字不差", c.bodyText() === full, c.bodyText());
+  }
+
+  /* 3. 删掉一条被切成几段的高亮：每一段都得撤掉，不能留下半条颜色 */
+  {
+    const c = mountContent(url, [H("d1", "可以同时处于两种状态"), H("d2", "处于两种", "pink")], body);
+    await tick(30);
+    ok("删除前外层有多段", of(c, "d1").length >= 2, of(c, "d1").length);
+    c.w.prompt = () => "!d";
+    of(c, "d1")[0].dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    eq("外层一段不剩", of(c, "d1").length, 0);
+    eq("内层不受影响", of(c, "d2").map((m) => m.textContent).join(""), "处于两种");
+    eq("存储里只剩内层那条", c.store.clipkeep_highlights.map((h) => h.id).join(","), "d2");
+    ok("原文一字不差", c.bodyText() === full, c.bodyText());
+  }
+
+  /* 4. 反复重放不能把嵌套越套越深 */
+  {
+    const c = mountContent(url, [H("r1", "可以同时处于两种状态"), H("r2", "处于两种", "pink")], body);
+    await tick(30);
+    const first = c.marks().length;
+    await c.chrome.storage.local.set({ clipkeep_highlights: c.store.clipkeep_highlights.slice() });
+    await tick(40);
+    await c.chrome.storage.local.set({ clipkeep_highlights: c.store.clipkeep_highlights.slice() });
+    await tick(40);
+    eq("重放两次标记数不变", c.marks().length, first);
+    eq("重放两次原文不变", c.bodyText(), full);
+    ok("同一条不会套自己",
+      !c.marks().some((a) => a.parentElement && a.parentElement.dataset && a.parentElement.dataset.hlid === a.dataset.hlid));
+  }
+
+  /* 5. 点重叠处改的是最里层那条，外层不受牵连 */
+  {
+    const c = mountContent(url, [H("n1", "可以同时处于两种状态", "yellow", { note: "外层批注" }), H("n2", "处于两种", "pink", { note: "内层批注" })], body);
+    await tick(30);
+    const inner = of(c, "n2")[0];
+    ok("内层标记存在", !!inner);
+    c.w.prompt = () => "改内层";
+    inner.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(40);
+    const st = c.store.clipkeep_highlights;
+    eq("内层批注已更新", (st.find((h) => h.id === "n2") || {}).note, "改内层");
+    eq("外层批注没被改", (st.find((h) => h.id === "n1") || {}).note, "外层批注");
+    await tick(40);
+    eq("重放后内层仍在外层里面", of(c, "n2").every((i) => of(c, "n1").some((o) => o.contains(i))), true);
+  }
+}
+
 /* ---------------- 3u. v1.8 审计：未命中删除 / 批量上限 / 覆盖失败 / 撤销计数 / 截断 ---------------- */
 
 async function testV18Audit() {
@@ -3326,7 +3416,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testV17Audit, testV18Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testV17Audit, testV18Audit, testManifests];
   for (const s of suites) {
     try {
       await s();
