@@ -365,7 +365,15 @@
     const wr = await hlWrite({ type: "clipkeep:hl-add", payload: rec });
     if (!wr || wr === "gone") { unwrapMark(mark); return; }
     window.getSelection().removeAllRanges();
-    toast(note ? "已批注 ✓" : "已高亮 ✓");
+    // 重放是拿整段文字在单个文本节点里找：跨了 <strong> / <a> / 段落的选区刷新后找不回来。
+    // 真正的跨节点锚定要到下个版本，这里至少别承诺「刷新后还在」
+    const word = note ? "已批注" : "已高亮";
+    toast(replayable(sel.range) ? word + " ✓" : word + "（跨元素，刷新后可能不显示）");
+  }
+
+  /** 这条选区刷新后还重放得回来吗：起点终点在同一个文本节点里才行 */
+  function replayable(range) {
+    return !!range && range.startContainer === range.endContainer && range.startContainer.nodeType === 3;
   }
 
   /** 拆掉一个标记，把里面的原文放回原位 */

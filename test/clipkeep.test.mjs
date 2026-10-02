@@ -3828,6 +3828,63 @@ async function testV19Audit() {
     ok("后台没写成功时不说「已清空」", !/已清空/.test(t), t);
     ok("如实说清空失败", /失败|重试/.test(t), t);
   }
+
+  /* 16. 确认框写着「高亮批注不受影响」，就不能连高亮的撤销记录一起清掉 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("c1", "要清掉的收藏")],
+      clipkeep_trash: [
+        { tid: "t-clip", kind: "clip", item: mk("gone1", "删掉的收藏"), deletedAt: now },
+        { tid: "t-hl", kind: "hl", item: { id: "h1", url: "http://a/x", text: "删掉的高亮", color: "yellow", note: "", createdAt: now }, deletedAt: now },
+      ],
+    });
+    p.w.confirm = () => true;
+    await p.click(p.$("btn-clear"));
+    await tick(40);
+    const trash = p.store.clipkeep_trash || [];
+    eq("收藏的撤销记录按承诺清掉", trash.filter((x) => x.kind === "clip").length, 0);
+    eq("高亮的撤销记录不受牵连", trash.filter((x) => x.kind === "hl").length, 1);
+  }
+
+  /* 17. 单独「清空回收站」仍然两类都清 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [],
+      clipkeep_trash: [
+        { tid: "t-clip", kind: "clip", item: mk("gone1", "删掉的收藏"), deletedAt: now },
+        { tid: "t-hl", kind: "hl", item: { id: "h1", url: "http://a/x", text: "删掉的高亮", color: "yellow", note: "", createdAt: now }, deletedAt: now },
+      ],
+    });
+    p.w.confirm = () => true;
+    await p.click(p.$("btn-trash-clear"));
+    await tick(40);
+    eq("回收站整批清空", (p.store.clipkeep_trash || []).length, 0);
+  }
+
+  /* 18. 跨元素的高亮重放不回来：创建时就得如实说，不能只报「已高亮 ✓」 */
+  {
+    const url = "http://localhost/xnode";
+    const c = mountContent(url, [], `<p>简介：<strong>量子比特</strong>可以叠加</p>`);
+    const strong = c.w.document.querySelector("p strong");
+    const range = c.w.document.createRange();
+    range.setStartBefore(strong);
+    range.setEndAfter(strong.nextSibling);
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    const btn = c.w.document.querySelector(".clipkeep-btn-hl");
+    ok("选字后浮动条出现", !!btn, c.w.document.getElementById("clipkeep-toolbar") ? "有工具条没按钮" : "无工具条");
+    btn.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    const t = c.toastText();
+    ok("跨元素高亮如实说明刷新后可能不显示", /跨元素|刷新/.test(t), t);
+    ok("不能只报一句「已高亮 ✓」就完事", !/^已高亮 ✓$/.test(t), t);
+    eq("记录确实存进了存储", (c.store.clipkeep_highlights || []).length, 1);
+    // 现状如实记录：重放只在单个文本节点里整段查找，跨节点的这段找不到标记
+    eq("重放后页面上没有标记（本版已知限制）", c.marks().length, 0);
+  }
 }
 
 /* ---------------- 4. 清单一致性 ---------------- */
