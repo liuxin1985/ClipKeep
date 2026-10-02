@@ -54,6 +54,9 @@ function chainStep(key, fn) {
     const out = (await fn(list)) || {};
     const next = out.list || out.items || list; // 两种写法都接受，clearAll 会传空数组
     if (out.write) await API.storage.local.set({ [key]: next });
+    // 附属记录（回收站、打卡）排在主键之后：先写附属会出现
+    // 「列表没删掉、回收站却多了一条」——弹窗照着回收站报「已删除，可撤销」，两头都对不上
+    if (out.after) await out.after(out.result);
     return out.result;
   };
   const result = writeChain.then(step, step); // 上一次失败不能卡死后续操作
@@ -253,8 +256,14 @@ function deleteItem(id) {
     if (idx === -1) return { result: { ok: false, error: "not_found" } };
     const entry = trashEntry("clip", items[idx]);
     items.splice(idx, 1);
-    await pushTrash([entry]); // 删除进回收站，⚙ 设置的保留时长内可撤销
-    return { write: true, items, result: { ok: true, count: items.length, trashed: true, tid: entry.tid } };
+    // 回收站排在「列表真的删掉了」之后写：反过来会留下一条列表里还在的幽灵条目，
+    // 弹窗对着回收站报「已删除 1 条 · 可撤销」，明细里还能点恢复
+    return {
+      write: true,
+      items,
+      after: async (r) => { try { await pushTrash([entry]); } catch (_) { r.trashed = false; } },
+      result: { ok: true, count: items.length, trashed: true, tid: entry.tid },
+    };
   });
 }
 
@@ -305,11 +314,15 @@ function deleteMany(ids) {
     const hit = items.filter((it) => it && want.has(it.id));
     if (!hit.length) return { result: { ok: true, removed: 0, count: items.length, limited: q.limited } };
     const tid = makeId();
-    await pushTrash(hit.map((it) => ({ ...trashEntry("clip", it), tid }))); // 整批一个撤销号
     const next = items.filter((it) => it && !want.has(it.id));
     return {
       write: true,
       items: next,
+      // 整批的回收站同样排在列表之后：列表没删成，一条都不该进回收站
+      after: async (r) => {
+        try { await pushTrash(hit.map((it) => ({ ...trashEntry("clip", it), tid }))); } // 整批一个撤销号
+        catch (_) { r.trashed = false; }
+      },
       result: { ok: true, removed: hit.length, count: next.length, trashed: true, tid, limited: q.limited },
     };
   });
@@ -396,8 +409,17 @@ function gradeItem(id, review) {
     // 明细只留最近 ACT_IDS_MAX 条：够回看当天复习了什么，长期跑也不会无限膨胀
     const ids = prev.ids.includes(id) ? prev.ids : prev.ids.concat(id).slice(-ACT_IDS_MAX);
     log[day] = { n: prev.n + 1, ids };
-    await API.storage.local.set({ [ACTIVITY_KEY]: log });
-    return { write: true, items, result: { ok: true, day, count: log[day].n } };
+    // 打卡记录排在排期写成功之后：先写活动的话，存储一满就变成
+    // 「分数没存进、热力图却替没发生的复习记了功」，重试三次今天就是 4 条
+    return {
+      write: true,
+      items,
+      after: async (r) => {
+        try { await API.storage.local.set({ [ACTIVITY_KEY]: log }); }
+        catch (_) { r.actFailed = true; r.count = 0; }
+      },
+      result: { ok: true, day, count: log[day].n },
+    };
   });
 }
 
@@ -454,8 +476,13 @@ function deleteHighlight(id) {
     if (idx === -1) return { result: { ok: false, error: "not_found" } };
     const entry = trashEntry("hl", list[idx]);
     list.splice(idx, 1);
-    await pushTrash([entry]);
-    return { write: true, list, result: { ok: true, count: list.length, trashed: true, tid: entry.tid } };
+    // 和收藏删除同一条规矩：高亮真的从列表里掉了，才轮到回收站收下它
+    return {
+      write: true,
+      list,
+      after: async (r) => { try { await pushTrash([entry]); } catch (_) { r.trashed = false; } },
+      result: { ok: true, count: list.length, trashed: true, tid: entry.tid },
+    };
   });
 }
 

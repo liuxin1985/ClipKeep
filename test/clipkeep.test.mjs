@@ -62,7 +62,12 @@ function makeBackend() {
           return o;
         },
         async set(obj) {
-          if (store.__failNextSet) { store.__failNextSet = false; throw new Error("QUOTA_EXCEEDED"); }
+          const bad = store.__failSetKey; // 按 key 掐失败点：一步里连着写几个 key，得能指名是哪一次没写进去
+          if (store.__failNextSet || (bad && bad in obj)) {
+            store.__failNextSet = false;
+            store.__failSetKey = null;
+            throw new Error("QUOTA_EXCEEDED");
+          }
           for (const k of Object.keys(obj)) {
             const before = store[k];
             store[k] = JSON.parse(JSON.stringify(obj[k]));
@@ -3537,6 +3542,116 @@ async function testV18Audit() {
   }
 }
 
+/* ---------------- 3v9. v1.9 独立审计复核 ---------------- */
+
+async function testV19Audit() {
+  console.log("\n[3v9] v1.9 审计复核：写失败不留半更新 / 计数与上限不说谎");
+  const now = Date.now();
+  const mk = (id, text, extra) => ({
+    id, text, note: "", tags: [], url: "http://x/1", title: "页面", createdAt: now - 1000, ...(extra || {}),
+  });
+  const stubOne = (chrome, type, res) => {
+    const orig = chrome.runtime.sendMessage.bind(chrome);
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (!msg || msg.type !== type) return orig(msg, cb);
+      if (typeof cb === "function") cb(res);
+      return Promise.resolve(res);
+    };
+  };
+
+  /* 1. 删除时列表写不进去：回收站里不能凭空多出一条「可撤销」 */
+  {
+    const be = makeBackend();
+    const add = await be.send({ type: "clipkeep:add", payload: { text: "还在列表里的", url: "http://a/x", title: "T" } });
+    const id = add.item.id;
+    be.store.__failSetKey = "clipkeep_items"; // 回收站先写成了，列表这条没删掉
+    const res = await be.send({ type: "clipkeep:delete", id });
+    await tick(20);
+    ok("列表写失败时删除如实报错", res && res.ok === false, JSON.stringify(res));
+    eq("收藏确实还留在列表里", be.store.clipkeep_items.length, 1);
+    eq("回收站不能留下一条列表里还在的收藏", (be.store.clipkeep_trash || []).length, 0);
+  }
+
+  /* 2. 批量删除同理：整批都没删掉，就不能有半批进回收站 */
+  {
+    const be = makeBackend();
+    const a = await be.send({ type: "clipkeep:add", payload: { text: "甲", url: "http://a/x", title: "T" } });
+    const b = await be.send({ type: "clipkeep:add", payload: { text: "乙", url: "http://a/x", title: "T" } });
+    be.store.__failSetKey = "clipkeep_items";
+    const res = await be.send({ type: "clipkeep:delete-many", ids: [a.item.id, b.item.id] });
+    await tick(20);
+    ok("批量删除写失败如实报错", res && res.ok === false, JSON.stringify(res));
+    eq("两条收藏都还在", be.store.clipkeep_items.length, 2);
+    eq("回收站一条都不该有", (be.store.clipkeep_trash || []).length, 0);
+  }
+
+  /* 3. 高亮删除同理：批注不能既在页面上又在回收站里 */
+  {
+    const be = makeBackend();
+    const hl = { id: "h1", url: "http://a/x", title: "T", text: "量子比特", color: "yellow", note: "重点", createdAt: Date.now() };
+    await be.send({ type: "clipkeep:hl-add", payload: hl });
+    be.store.__failSetKey = "clipkeep_highlights";
+    const res = await be.send({ type: "clipkeep:hl-delete", id: "h1" });
+    await tick(20);
+    ok("高亮删除写失败如实报错", res && res.ok === false, JSON.stringify(res));
+    eq("高亮还在原处", be.store.clipkeep_highlights.length, 1);
+    eq("回收站不该提前收下这条高亮", (be.store.clipkeep_trash || []).length, 0);
+  }
+
+  /* 4. 打分：排期没写进去就不能算一次打卡，否则热力图替没发生的事记功 */
+  {
+    const be = makeBackend();
+    const add = await be.send({ type: "clipkeep:add", payload: { text: "要复习的", url: "http://a/x", title: "T" } });
+    const id = add.item.id;
+    be.store.__failSetKey = "clipkeep_items"; // 活动记录写得动，收藏这条写不动
+    const res = await be.send({ type: "clipkeep:grade", id, review: { box: 1, due: Date.now() + 86400000 } });
+    await tick(20);
+    ok("排期写失败时打分如实报错", res && res.ok === false, JSON.stringify(res));
+    const log = be.store.clipkeep_activity || {};
+    const total = Object.keys(log).reduce((s, k) => s + ((log[k] || {}).n || 0), 0);
+    eq("打卡计数不能被没存进去的打分撑起来", total, 0);
+  }
+
+  /* 5. 附属写入失败时，弹窗不能再说「可撤销」*/
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("d1", "删得掉但撤销不了")] });
+    stubOne(p.chrome, "clipkeep:delete", { ok: true, count: 0, trashed: false });
+    await p.click(p.q('.item [data-act="del"]'));
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("回收站没写进去时不说「可撤销」", !/可撤销/.test(t), t);
+    ok("照样如实说明这条删了", /已删除/.test(t), t);
+    ok("说清这条撤销不了", /撤销不|无法撤销|不能撤销/.test(t), t);
+  }
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("d2", "甲"), mk("d3", "乙")],
+    });
+    await p.click(p.qa('.item input[data-act="sel"]')[0]);
+    await p.click(p.qa('.item input[data-act="sel"]')[1]);
+    await tick(10);
+    stubOne(p.chrome, "clipkeep:delete-many", { ok: true, removed: 2, count: 0, trashed: false, limited: false });
+    await p.click(p.$("btn-batch-del"));
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("批量删除同理不说可撤销", !/可撤销/.test(t), t);
+    ok("批量删除报出真实条数", /2/.test(t), t);
+  }
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("g1", "要复习的", { review: { box: 1, due: now - 10, seen: 1 } })],
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    stubOne(p.chrome, "clipkeep:grade", { ok: true, day: "2026-10-03", count: 0, actFailed: true });
+    await p.click(p.q('[data-act="reveal"]'));
+    await tick(20);
+    await p.click(p.q('[data-act="grade"][data-g="1"]'));
+    await tick(40);
+    ok("排期存了但打卡没写进去时如实说明", /打卡|热力图/.test(p.$("toast").textContent), p.$("toast").textContent);
+  }
+}
+
 /* ---------------- 4. 清单一致性 ---------------- */
 
 async function testManifests() {
@@ -3608,7 +3723,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testManifests];
   for (const s of suites) {
     try {
       await s();

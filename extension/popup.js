@@ -1005,6 +1005,7 @@
       grading = false; // 刷新完成后才交还点击权；卡片重渲染后按钮自然是可用状态
     }
     if (!res || !res.ok) toast("打分保存失败，已还原，请重试");
+    else if (res.actFailed) toast("分数存好了，但今天的打卡记录没写进去（热力图会少这一条）");
   }
 
   reviewEl.addEventListener("click", async (e) => {
@@ -1156,8 +1157,12 @@
       const res = await API.runtime.sendMessage({ type: "clipkeep:delete-many", ids });
       await load(); // 以存储为准：删掉的 id 会在 renderBatchbar 里被剪掉
       if (!res || !res.ok) return toast("批量删除失败，请重试");
-      // 一次能删的有上限，说清楚还剩多少，别让用户以为整批都干净了
-      toast(res.limited ? `已删除 ${res.removed} 条（单次上限），剩下的请再选一批` : `已删除 ${res.removed} 条，可撤销`);
+      // 一次能删的有上限，说清楚还剩多少，别让用户以为整批都干净了；
+      // 回收站没写进去就没有「可撤销」可言，说了等于让人对着撤不回来的东西放心
+      const undo = res.trashed === false ? "，但回收站没写进去，撤销不了" : "，可撤销";
+      toast(res.limited
+        ? `已删除 ${res.removed} 条（单次上限）${undo}，剩下的请再选一批`
+        : `已删除 ${res.removed} 条${undo}`);
     });
   }
 
@@ -1206,7 +1211,8 @@
         const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
         await load();
         // 三种结果三句话：真删了、这条早就不在了、写存储失败
-        toast(res && res.ok ? "已删除，可撤销"
+        toast(res && res.ok
+          ? (res.trashed === false ? "已删除，但回收站没写进去，这条撤销不了" : "已删除，可撤销")
           : res && res.error === "not_found" ? "这条已经不在收藏里了"
           : "删除失败，请重试");
       });
