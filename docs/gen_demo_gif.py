@@ -89,12 +89,14 @@ FRAMES = [
     ("w_sel", "example.com/quantum-computing", "① 网页上划选文字，工具条浮出：收藏 / 高亮 / 批注 / 净化阅读"),
     ("w_card", "example.com/quantum-computing", "② 点「★ 收藏」，顺手写下备注和标签——只存本地，不传服务器"),
     ("p_clips", "example.com/quantum-computing", "③ 弹窗里统一管理：搜索、标签筛选、复制、导出 Markdown、删除"),
-    ("p_batch2", "example.com/quantum-computing", "④ 勾选任意几条，批量加标签 / 导出 / 删除一起走"),
+    ("p_filter", "example.com/quantum-computing", "④ 类型与站点筛选：只看图片、只看这个站，和搜索标签取交集"),
     ("p_batchall", "example.com/quantum-computing", "⑤ 全选跟的是当前筛选结果，导出的就是看到的这一批"),
-    ("p_marks", "example.com/quantum-computing", "⑥ 高亮按页面归组，四色轮转，批注跟着原文一起留档"),
-    ("p_review", "example.com/quantum-computing", "⑦ 每日回顾：间隔重复排期 + 打卡热力图，收藏不再是黑洞"),
-    ("p_reveal", "example.com/quantum-computing", "⑧ 空格翻答案，1 / 2 / 3 打分，整批删除也能一次撤销"),
-    ("p_dark", "example.com/quantum-computing", "⑨ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
+    ("p_focus", "example.com/quantum-computing", "⑥ 列表键盘流：↑ / ↓ 移焦点，x 勾选，Enter 展开全文"),
+    ("p_keys", "example.com/quantum-computing", "⑦ 按 ? 随时查键位，浮层里列的就是真能按的那几个"),
+    ("p_marks", "example.com/quantum-computing", "⑧ 高亮按页面归组，四色轮转，批注跟着原文一起留档"),
+    ("p_review", "example.com/quantum-computing", "⑨ 每日回顾：间隔重复排期 + 打卡热力图，收藏不再是黑洞"),
+    ("p_reveal", "example.com/quantum-computing", "⑩ 空格翻答案，1 / 2 / 3 打分，整批删除也能一次撤销"),
+    ("p_dark", "example.com/quantum-computing", "⑪ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
 ]
 
 
