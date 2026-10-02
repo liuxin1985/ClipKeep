@@ -12,6 +12,7 @@
   const PREFS_KEY = "clipkeep_prefs";
   const ACTIVITY_KEY = "clipkeep_activity"; // 每天回顾了多少条，画热力图用
   const MAX_TEXT = 20000; // 与后台收藏写入的截断上限一致，标记时要说同一个数
+  const BATCH_MAX = 1000; // 与后台 cleanIds 的单次批量上限一致，提示时要说同一个数
   const CLAMP_AT = 240; // 超过这个长度的收藏在列表里默认折叠
   const DAY = 86400000;
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
@@ -622,7 +623,11 @@
     } else if (act === "hl-del") {
       // 走后台：进回收站 + 串行写，避免整表覆盖抹掉别处新增的高亮
       const res = await API.runtime.sendMessage({ type: "clipkeep:hl-delete", id });
-      if (!res || !res.ok) return toast("删除失败，请重试");
+      if (!res || !res.ok) {
+        if (res && res.error === "not_found") { await load(); toast("这条高亮已经不在了"); }
+        else toast("删除失败，请重试");
+        return;
+      }
       await load();
       toast("已删除高亮");
     }
@@ -652,8 +657,11 @@
       }
       await load();
       // 批量删除共用一个撤销号，一次撤销还原整批，提示就要报出真实条数
-      const n = Number(res.restored) || 1;
-      toast(res.exists ? "该内容已存在，未重复添加" : n > 1 ? `已撤销 ${n} 条删除 ✓` : "已撤销删除 ✓");
+      const n = Number(res.restored) || 0;
+      const skipped = Number(res.existed) || 0;
+      if (skipped && n) toast(`已撤销 ${n} 条，另有 ${skipped} 条已存在未重复添加`);
+      else if (skipped) toast("该内容已存在，未重复添加");
+      else toast(n > 1 ? `已撤销 ${n} 条删除 ✓` : "已撤销删除 ✓");
     });
   });
 
@@ -1094,7 +1102,12 @@
       const res = await API.runtime.sendMessage({ type: "clipkeep:tag-add-many", ids, tags: val });
       await load();
       if (!res || !res.ok) return toast("批量加标签失败，请重试");
-      toast(res.changed ? `已给 ${res.changed} 条加标签` : "标签没有变化");
+      const n = Number(res.changed) || 0;
+      // 一次处理不完就说清楚，别报「已给 N 条加标签」让用户以为整批都改完了
+      if (res.limited && !n) return toast(`一次最多处理 ${BATCH_MAX} 条，请分批再选`);
+      toast(res.limited
+        ? `已给 ${n} 条加标签（单次上限 ${BATCH_MAX} 条），剩下的请再选一批`
+        : n ? `已给 ${n} 条加标签` : "标签没有变化");
     });
   }
 
@@ -1123,7 +1136,10 @@
         // 提示要跟着真实结果走：后台没写成功就不能报「已删除」
         const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
         await load();
-        toast(res && res.ok ? "已删除，可撤销" : "删除失败，请重试");
+        // 三种结果三句话：真删了、这条早就不在了、写存储失败
+        toast(res && res.ok ? "已删除，可撤销"
+          : res && res.error === "not_found" ? "这条已经不在收藏里了"
+          : "删除失败，请重试");
       });
     }
     else if (act === "tag") {
@@ -1418,9 +1434,12 @@
   async function writeBoth(itemsArr, hlArr, takenAt) {
     const iRes = await API.runtime.sendMessage({ type: "clipkeep:replace", payload: { items: itemsArr, takenAt } });
     const hRes = await API.runtime.sendMessage({ type: "clipkeep:hl-replace", payload: { highlights: hlArr, takenAt } });
+    // 成败要各自带回去：没写成功却照报条数，就是当着用户的面说谎
     return {
-      items: iRes && iRes.ok ? iRes.count : itemsArr.length,
-      hl: hRes && hRes.ok ? hRes.count : hlArr.length,
+      itemsOk: !!(iRes && iRes.ok),
+      hlOk: !!(hRes && hRes.ok),
+      items: iRes && iRes.ok ? iRes.count : 0,
+      hl: hRes && hRes.ok ? hRes.count : 0,
     };
   }
 
@@ -1454,6 +1473,12 @@
     const written = await writeBoth(itemsArr, hlArr, p.takenAt);
     closeRestoreModal();
     await load();
+    if (!written.itemsOk || !written.hlOk) {
+      // 后台没写成功就别报「已覆盖」：说清楚哪一类没进去，本地内容还是原样
+      const bad = [!written.itemsOk ? "收藏" : "", !written.hlOk ? "高亮" : ""].filter(Boolean).join(" / ");
+      toast(`覆盖失败：${bad}没有写入成功，本地内容未变，请重试`);
+      return;
+    }
     toast(`已用备份覆盖：共 ${written.items} 收藏 · ${written.hl} 高亮`);
   });
 

@@ -248,7 +248,9 @@ function addItem(payload) {
 function deleteItem(id) {
   return mutate(async (items) => {
     const idx = items.findIndex((it) => it.id === id);
-    if (idx === -1) return { result: { ok: true, count: items.length } };
+    // 删一条已经不存在的记录不算删除成功：报 ok 的话，弹窗会跟着说「已删除，可撤销」，
+    // 而回收站里根本没有东西可撤销（和 update 的 not_found 保持一致）
+    if (idx === -1) return { result: { ok: false, error: "not_found" } };
     const entry = trashEntry("clip", items[idx]);
     items.splice(idx, 1);
     await pushTrash([entry]); // 删除进回收站，⚙ 设置的保留时长内可撤销
@@ -449,7 +451,7 @@ function updateHighlight(id, patch) {
 function deleteHighlight(id) {
   return mutateHl(async (list) => {
     const idx = list.findIndex((x) => x && x.id === id);
-    if (idx === -1) return { result: { ok: true, count: list.length } };
+    if (idx === -1) return { result: { ok: false, error: "not_found" } };
     const entry = trashEntry("hl", list[idx]);
     list.splice(idx, 1);
     await pushTrash([entry]);
@@ -474,14 +476,14 @@ function trashRestore(tid) {
   return mutateTrash(async (trash) => {
     const hit = trash.filter((t) => t && t.tid === tid);
     if (!hit.length) return { result: { ok: false, error: "not_found" } };
-    let exists = false;
+    let existed = 0;
     for (const entry of hit) {
       const res = await restoreEntry(entry);
       if (!res || !res.ok) return { result: { ok: false, error: "restore_failed" } };
-      if (res.exists) exists = true; // 整批里只要有一条撞了 id，提示就别再报「已撤销」
+      if (res.exists) existed++; // 撞了 id 的那几条没真的回来，计数里要刨掉
     }
     const rest = trash.filter((t) => !(t && t.tid === tid));
-    return { write: true, list: rest, result: { ok: true, kind: hit[0].kind, restored: hit.length, exists } };
+    return { write: true, list: rest, result: { ok: true, kind: hit[0].kind, restored: hit.length - existed, existed } };
   });
 }
 
@@ -626,7 +628,10 @@ async function saveClip(tab, payload) {
     notifyTab(tab.id, {
       type: "clipkeep:toast",
       message: res.ok
-        ? res.dup ? "这条已经在收藏里了" : "已收藏 ✓"
+        ? res.dup ? "这条已经在收藏里了"
+          // 超长只存了前半部分，提示要说出来，否则用户以为剪到了全文
+          : res.item && res.item.truncated ? `已收藏 ✓（超过 ${MAX_TEXT} 字，已截断）`
+          : "已收藏 ✓"
         : res.error === "empty" ? "内容为空" : saveFailMessage(res),
     });
   } catch (err) {

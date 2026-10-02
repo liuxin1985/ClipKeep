@@ -3070,6 +3070,191 @@ async function testV17Audit() {
   }
 }
 
+/* ---------------- 3u. v1.8 审计：未命中删除 / 批量上限 / 覆盖失败 / 撤销计数 / 截断 ---------------- */
+
+async function testV18Audit() {
+  console.log("\n[3u] v1.8 审计：未命中删除、批量上限、覆盖失败、撤销计数与截断提示");
+  const now = Date.now();
+  const mk = (id, text, extra) => ({
+    id, text, note: "", tags: [], url: "http://x/1", title: "来源", createdAt: now, ...(extra || {}),
+  });
+  const hl = (id, text) => ({ id, url: "http://localhost/p", text, color: "yellow", note: "", createdAt: now });
+  /** 只拦某一种消息，其余照原样发给真后台 */
+  const stubOne = (chrome, type, res) => {
+    const orig = chrome.runtime.sendMessage.bind(chrome);
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (!msg || msg.type !== type) return orig(msg, cb);
+      if (typeof cb === "function") cb(res);
+      return Promise.resolve(res);
+    };
+  };
+
+  /* 1. 后台契约：删一条已经不存在的记录不是「删除成功」。update 早就报 not_found，删除不能只报成功 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("k1", "在册收藏")];
+    const r = await be.send({ type: "clipkeep:delete", id: "gone" });
+    ok("删除不在册收藏报 not_found", r && r.ok === false && r.error === "not_found", JSON.stringify(r));
+    eq("未命中的删除不动数据", be.store.clipkeep_items.length, 1);
+    eq("未命中的删除不写回收站", (be.store.clipkeep_trash || []).length, 0);
+
+    be.store.clipkeep_highlights = [hl("h1", "在册高亮")];
+    const h = await be.send({ type: "clipkeep:hl-delete", id: "gone" });
+    ok("删除不在册高亮报 not_found", h && h.ok === false && h.error === "not_found", JSON.stringify(h));
+    eq("未命中的高亮删除不写回收站", (be.store.clipkeep_trash || []).length, 0);
+  }
+
+  /* 2. 弹窗：后台报 not_found 时提示要说「已经不在了」，不能报「可撤销」 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("s1", "在册收藏")] });
+    stubOne(p.chrome, "clipkeep:delete", { ok: false, error: "not_found" });
+    await p.click(p.q('.item[data-id="s1"] [data-act="del"]'));
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("未命中的收藏删除不报「可撤销」", !/可撤销/.test(t), t);
+    ok("未命中的收藏删除说清原因", /不在收藏里/.test(t), t);
+  }
+  {
+    const p = await mountPopup({ clipkeep_highlights: [hl("s2", "在册高亮")] });
+    stubOne(p.chrome, "clipkeep:hl-delete", { ok: false, error: "not_found" });
+    await p.click(p.q('.tab[data-view="marks"]'));
+    await p.click(p.q('.hl-item[data-hlid="s2"] [data-act="hl-del"]'));
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("未命中的高亮删除不报「已删除高亮」", !/已删除高亮/.test(t), t);
+    ok("未命中的高亮删除说清原因", /不在了/.test(t), t);
+  }
+
+  /* 3. 页面：!d 删一条早被别处删掉的高亮，要清掉残留标记，不能甩一句「存储不可用」 */
+  {
+    const c = mountContent("http://localhost/p", [hl("g1", "在册高亮")], "<p>在册高亮，后面还有字。</p>");
+    await tick(20);
+    eq("起始页面有标记", c.marks().length, 1);
+    stubOne(c.chrome, "clipkeep:hl-delete", { ok: false, error: "not_found" });
+    c.w.prompt = () => "!d";
+    c.w.document.querySelector('mark[data-hlid="g1"]')
+      .dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(40);
+    ok("已消失的高亮标记被清掉", c.marks().length === 0, c.marks().map((m) => m.dataset.hlid).join(","));
+    ok("原文没有丢", /在册高亮，后面还有字/.test(c.bodyText()), c.bodyText().slice(0, 40));
+    const t = c.toastText();
+    ok("提示不误报存储不可用", !/存储不可用/.test(t), t);
+    ok("提示说清这条已经不在了", /不在了/.test(t), t);
+  }
+
+  /* 4. 批量加标签撞上单次上限：后台要报 limited，提示要说清楚还剩没处理的 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("q0", "第一条"), mk("q1", "第二条"), mk("q2", "第三条")];
+    const ids = ["q0", "q1", "q2"].concat(Array.from({ length: 1200 }, (_, i) => "x" + i));
+    const r = await be.send({ type: "clipkeep:tag-add-many", ids, tags: "待办" });
+    ok("批量加标签超限报 limited", r && r.ok === true && r.limited === true, JSON.stringify(r));
+    eq("上限内的标签照常写入", be.store.clipkeep_items.filter((x) => (x.tags || []).includes("待办")).length, 3);
+  }
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("t1", "第一条"), mk("t2", "第二条")] });
+    stubOne(p.chrome, "clipkeep:tag-add-many", { ok: true, changed: 2, limited: true });
+    p.w.prompt = () => "待办";
+    p.qa('#list .item input[data-act="sel"]').forEach((b) => b.dispatchEvent(new p.w.MouseEvent("click", { bubbles: true })));
+    await tick(10);
+    await p.click(p.$("btn-batch-tag"));
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("批量加标签撞上限要说出来", /上限/.test(t), t);
+  }
+
+  /* 5. 覆盖本地：后台没写成功，提示就不能报「已用备份覆盖」 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("w1", "本地收藏")] });
+    stubOne(p.chrome, "clipkeep:replace", { ok: false, error: "Error: QUOTA_EXCEEDED" });
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [mk("w2", "备份收藏")], highlights: [] });
+    ok("差异弹窗打开", p.$("modal").hidden === false);
+    await p.click(p.$("modal-alt"));
+    await tick(40);
+    const t = p.$("toast").textContent;
+    ok("覆盖失败不谎报已覆盖", !/已用备份覆盖/.test(t), t);
+    ok("覆盖失败有明确反馈", /失败|重试/.test(t), t);
+    eq("本地收藏没被动过", p.store.clipkeep_items.length, 1);
+  }
+
+  /* 6. 撤销整批：撞了 id 没还原的那几条不能算进「已撤销 N 条」 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("z1", "第一条"), mk("z2", "第二条")];
+    await be.send({ type: "clipkeep:delete", id: "z1" });
+    await be.send({ type: "clipkeep:delete", id: "z2" });
+    (be.store.clipkeep_trash || []).forEach((t) => { t.tid = "shared"; }); // 伪造一条撤销号的整批
+    be.store.clipkeep_items.push(mk("z2", "第二条（别处已经回来了）"));
+    const r = await be.send({ type: "clipkeep:trash-restore", tid: "shared" });
+    ok("还原条数只算真回来的", r.restored === 1, JSON.stringify(r));
+    ok("撞 id 的条数单独报", r.existed === 1, JSON.stringify(r));
+  }
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("u1", "第一条")],
+      clipkeep_trash: [{ tid: "T", kind: "clip", item: mk("u9", "第九条"), deletedAt: now }],
+    });
+    stubOne(p.chrome, "clipkeep:trash-restore", { ok: true, kind: "clip", restored: 1, existed: 1 });
+    await p.click(p.$("btn-undo"));
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("部分还原说出真还原数", /已撤销 1 条/.test(t), t);
+    ok("部分还原说出没还原的那条", /另有 1 条/.test(t), t);
+  }
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("u1", "第一条")],
+      clipkeep_trash: [{ tid: "T", kind: "clip", item: mk("u9", "第九条"), deletedAt: now }],
+    });
+    stubOne(p.chrome, "clipkeep:trash-restore", { ok: true, kind: "clip", restored: 0, existed: 2 });
+    await p.click(p.$("btn-undo"));
+    await tick(30);
+    ok("整批都没还原时不报「已撤销」", !/已撤销/.test(p.$("toast").textContent), p.$("toast").textContent);
+  }
+
+  /* 7. 收藏成功的提示不能藏着截断：超长正文只存了前半部分 */
+  {
+    const be = makeBackend();
+    await be.fireMenuClick(
+      { menuItemId: "clipkeep-save", selectionText: "长".repeat(25000), pageUrl: "http://a" },
+      { id: 1, title: "T", url: "http://a" }
+    );
+    const toasts = be.sentToTab.map((s) => s.msg.message).join("|");
+    ok("右键收藏超长要提示截断", /截断/.test(toasts), toasts.slice(0, 60));
+    const be2 = makeBackend();
+    await be2.fireMenuClick(
+      { menuItemId: "clipkeep-save", selectionText: "正常长度", pageUrl: "http://a" },
+      { id: 1, title: "T", url: "http://a" }
+    );
+    ok("未截断时不提截断", !/截断/.test(be2.sentToTab.map((s) => s.msg.message).join("|")));
+  }
+  {
+    const long = "长".repeat(21000);
+    const c = mountContent("http://localhost/p", [], `<p>${long}</p>`);
+    await tick(20);
+    const para = c.w.document.querySelector("article p");
+    const range = c.w.document.createRange();
+    range.setStart(para.firstChild, 0);
+    range.setEnd(para.firstChild, long.length);
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    const bar = c.w.document.getElementById("clipkeep-toolbar");
+    ok("超长选区也弹出工具条", !!bar);
+    bar.querySelector(".clipkeep-btn-save").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(10);
+    const card = c.w.document.querySelector(".clipkeep-card");
+    ok("收藏卡片打开", !!card);
+    card.querySelector(".clipkeep-btn-confirm").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(40);
+    eq("超长正文仍入库", c.store.clipkeep_items.length, 1);
+    eq("入库正文截断到上限", ((c.store.clipkeep_items[0] || {}).text || "").length, 20000);
+    ok("页面收藏提示说出截断", /截断/.test(c.toastText()), c.toastText());
+  }
+}
+
 /* ---------------- 4. 清单一致性 ---------------- */
 
 async function testManifests() {
@@ -3141,7 +3326,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testV17Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testV17Audit, testV18Audit, testManifests];
   for (const s of suites) {
     try {
       await s();

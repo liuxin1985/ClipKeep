@@ -57,6 +57,7 @@
   let contextLost = false;
   const RELOAD_HINT = "ClipKeep 已更新，请刷新页面后继续使用";
   const STORE_HINT = "保存失败：本地存储不可用，请稍后重试";
+  const GONE_HINT = "这条高亮已经不在了"; // 别处删掉的：清标记就行，别谎报存储坏了
 
   function noteStorageDead(err) {
     const s = String((err && err.message) || err || "");
@@ -81,7 +82,8 @@
   }
   /**
    * 高亮的写入统一交给后台串行执行（页面只负责读）。
-   * 返回 null 表示没落盘：调用方要回滚界面，别让页面和存储不一致。
+   * 返回 null 表示没落盘：调用方要回滚界面，别让页面和存储不一致；
+   * 返回 "gone" 表示那条在存储里已经没有了（别处删的），同样要回滚界面。
    */
   async function hlWrite(msg) {
     if (contextLost) {
@@ -96,7 +98,9 @@
       return null;
     }
     if (res && res.ok) return res;
-    noteStorageDead(res && res.error); // 后台把存储错误翻译成了 {ok:false}，别静默失败
+    // 记录已被别处删掉：存储好得很，只是那条不在了，别报「存储不可用」
+    if (res && res.error === "not_found") return "gone";
+    noteStorageDead(res && res.error);
     return null;
   }
   function makeId() {
@@ -289,7 +293,10 @@
   /** 收藏结果的用户话术：重复入库要说「已经存过」，别报一个假的「已收藏」 */
   function saveToast(res) {
     if (res && res.dup) return "这条已经在收藏里了";
-    if (res && res.ok) return "已收藏 ✓";
+    if (res && res.ok) {
+      // 只存了前半部分就说「已收藏 ✓」，用户会以为自己剪到了全文
+      return res.item && res.item.truncated ? "已收藏 ✓（内容过长，已截断）" : "已收藏 ✓";
+    }
     return "保存失败";
   }
 
@@ -355,7 +362,8 @@
       note: note || "",
       createdAt: Date.now(),
     };
-    if (!(await hlWrite({ type: "clipkeep:hl-add", payload: rec }))) { unwrapMark(mark); return; }
+    const wr = await hlWrite({ type: "clipkeep:hl-add", payload: rec });
+    if (!wr || wr === "gone") { unwrapMark(mark); return; }
     window.getSelection().removeAllRanges();
     toast(note ? "已批注 ✓" : "已高亮 ✓");
   }
@@ -472,13 +480,21 @@
     if (action === null) return;
     if (action.trim().toLowerCase() === "!d") {
       // 先写存储（进回收站，可撤销），成功后再改页面：失败时标记还在，和存储保持一致
-      if (await hlWrite({ type: "clipkeep:hl-delete", id })) {
+      const r = await hlWrite({ type: "clipkeep:hl-delete", id });
+      if (r === "gone") {
+        unwrapMark(mark); // 存储里早没了：清掉残留标记，提示说清去向
+        toast(GONE_HINT);
+      } else if (r) {
         unwrapMark(mark);
         toast("已删除高亮");
       }
     } else {
       const note = action.trim();
-      if (await hlWrite({ type: "clipkeep:hl-update", id, patch: { note } })) {
+      const r = await hlWrite({ type: "clipkeep:hl-update", id, patch: { note } });
+      if (r === "gone") {
+        unwrapMark(mark);
+        toast(GONE_HINT);
+      } else if (r) {
         mark.title = note ? "ClipKeep 批注：" + note : "";
         mark.classList.toggle("has-note", !!note);
         toast("批注已更新 ✓");
@@ -565,7 +581,9 @@
           type: "clipkeep:add",
           payload: { text: full, tags: "全文", url: location.href, title: document.title },
         });
-        toast(res && res.dup ? "全文已经收藏过了" : res && res.ok ? "已收藏全文 ✓" : "收藏失败");
+        const okAll = res && res.ok;
+        const cut = okAll && res.item && res.item.truncated;
+        toast(res && res.dup ? "全文已经收藏过了" : okAll ? (cut ? "已收藏全文 ✓（正文过长，已截断）" : "已收藏全文 ✓") : "收藏失败");
       }
     });
   }
