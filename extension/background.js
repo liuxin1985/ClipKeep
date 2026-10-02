@@ -562,8 +562,15 @@ function trashRestore(tid) {
   });
 }
 
-function trashClear() {
-  return mutateTrash(() => ({ write: true, list: [], result: { ok: true } }));
+/**
+ * 清空回收站。带 kind 时只清这一类：「清空全部收藏」的承诺是高亮批注不受影响，
+ * 连高亮的撤销记录一起抹掉就等于当面毁约。
+ */
+function trashClear(kind) {
+  return mutateTrash((list) => {
+    const next = kind ? list.filter((e) => e && e.kind !== kind) : [];
+    return { write: true, list: next, result: { ok: true, cleared: list.length - next.length } };
+  });
 }
 
 /**
@@ -889,7 +896,7 @@ if (API.runtime && API.runtime.onMessage) {
             sendResponse(await trashRestoreOne(msg.payload));
             break;
           case "clipkeep:trash-clear":
-            sendResponse(await trashClear());
+            sendResponse(await trashClear(msg.kind));
             break;
           case "clipkeep:reader":
             if (sender.tab) runReader(sender.tab);

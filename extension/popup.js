@@ -1625,12 +1625,13 @@
   $("btn-clear").addEventListener("click", async () => {
     if (!items.length) return toast("已经是空的了");
     if (confirm("确定清空全部收藏？此操作不可恢复（高亮批注不受影响）。")) {
-      // 说了「不可恢复」就要真的不可恢复：先看收藏清没清，再看回收站关没关
+      // 说了「不可恢复」就要真的不可恢复，也说了高亮批注不受影响：
+      // 只关收藏这一类的撤销后门，别把高亮的记录一起毁掉
       const res = await send({ type: "clipkeep:clear" });
       if (!res || !res.ok) { await load(); return failToast(res, "清空失败，收藏还在，请重试"); }
-      const t = await send({ type: "clipkeep:trash-clear" });
+      const t = await send({ type: "clipkeep:trash-clear", kind: "clip" });
       await load();
-      toast(t && t.ok ? "已清空" : "收藏已清空，但回收站没关掉，撤销记录还在");
+      toast(t && t.ok ? "已清空" : "收藏已清空，但收藏的撤销记录没关掉，还能撤销");
     }
   });
 
