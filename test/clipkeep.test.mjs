@@ -3337,6 +3337,19 @@ async function testTrashDetail() {
     });
     eq("只有一批时按钮仍叫撤销", p.$("btn-undo").textContent, "撤销");
   }
+
+  /* 8. 整批撤销也要先做过期清理：弹窗开着不动，条目过期后就不该还能捞回来。
+        逐条恢复那条路已经 prune 了，两条路口径必须一致。 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("e1", "会过期的")];
+    await be.send({ type: "clipkeep:delete", id: "e1" });
+    const tid = be.store.clipkeep_trash[0].tid;
+    be.store.clipkeep_trash[0].deletedAt = now - 999 * 60 * 1000; // 时间走到保留期之外
+    const r = await be.send({ type: "clipkeep:trash-restore", tid });
+    ok("过期后整批撤销也捞不回来", r.ok === false && r.error === "not_found", JSON.stringify(r));
+    eq("过期的内容不会偷偷回到列表", be.store.clipkeep_items.length, 0);
+  }
 }
 
 /* ---------------- 3u. v1.8 审计：未命中删除 / 批量上限 / 覆盖失败 / 撤销计数 / 截断 ---------------- */

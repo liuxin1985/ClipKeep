@@ -474,15 +474,18 @@ function trashList() {
  */
 function trashRestore(tid) {
   return mutateTrash(async (trash) => {
-    const hit = trash.filter((t) => t && t.tid === tid);
-    if (!hit.length) return { result: { ok: false, error: "not_found" } };
+    const next = pruneTrash(trash, await trashTtlMs()); // 过期先清掉：和逐条恢复同口径，弹窗开着不动也不能让过期的复活
+    const hit = next.filter((t) => t && t.tid === tid);
+    if (!hit.length) {
+      return { write: next.length !== trash.length, list: next, result: { ok: false, error: "not_found" } };
+    }
     let existed = 0;
     for (const entry of hit) {
       const res = await restoreEntry(entry);
       if (!res || !res.ok) return { result: { ok: false, error: "restore_failed" } };
       if (res.exists) existed++; // 撞了 id 的那几条没真的回来，计数里要刨掉
     }
-    const rest = trash.filter((t) => !(t && t.tid === tid));
+    const rest = next.filter((t) => !(t && t.tid === tid));
     return { write: true, list: rest, result: { ok: true, kind: hit[0].kind, restored: hit.length - existed, existed } };
   });
 }
