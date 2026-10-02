@@ -32,6 +32,27 @@
     export: { heading: "numbered", source: true, frontMatter: false },
   };
 
+  const DEAD_BACKEND = "ClipKeep 已更新，请重新打开弹窗再操作";
+
+  /**
+   * 统一发消息。扩展刚更新完、后台被换成新实例时，真 chrome 会让 sendMessage 直接
+   * reject（"Extension context invalidated"）：裸调用会当场静默失灵，点了删除什么
+   * 都没发生，用户只会以为是自己操作错了。兜住它，并说清「重开一次弹窗」。
+   */
+  async function send(msg) {
+    try {
+      return await API.runtime.sendMessage(msg); // 唯一一处裸调用：这里就是要抓失联异常
+    } catch (_) {
+      toast(DEAD_BACKEND);
+      return { ok: false, error: "dead_backend" };
+    }
+  }
+
+  /** 失败提示统一走这里：后台失联时「请重试」是句废话，重开弹窗才有用 */
+  function failToast(res, fallback) {
+    toast(res && res.error === "dead_backend" ? DEAD_BACKEND : fallback);
+  }
+
   const $ = (id) => document.getElementById(id);
   const listEl = $("list");
   const emptyEl = $("empty");
@@ -216,7 +237,7 @@
    */
   async function readTrash() {
     try {
-      const res = await API.runtime.sendMessage({ type: "clipkeep:trash-list" });
+      const res = await send({ type: "clipkeep:trash-list" });
       if (res && res.ok && Array.isArray(res.items)) return res.items;
     } catch (_) {
       /* 后台不可用时退回直读 */
@@ -620,16 +641,16 @@
     if (act === "hl-copy") copyText(h.text);
     else if (act === "hl-color") {
       // 换色也走后台：那里有颜色白名单，且整条写链保证不抹掉别处的改动
-      const res = await API.runtime.sendMessage({ type: "clipkeep:hl-update", id, patch: { color: nextHlColor(h.color) } });
-      if (!res || !res.ok) return toast("换色失败，请重试");
+      const res = await send({ type: "clipkeep:hl-update", id, patch: { color: nextHlColor(h.color) } });
+      if (!res || !res.ok) return failToast(res, "换色失败，请重试");
       await load();
       toast("已换色");
     } else if (act === "hl-del") {
       // 走后台：进回收站 + 串行写，避免整表覆盖抹掉别处新增的高亮
-      const res = await API.runtime.sendMessage({ type: "clipkeep:hl-delete", id });
+      const res = await send({ type: "clipkeep:hl-delete", id });
       if (!res || !res.ok) {
         if (res && res.error === "not_found") { await load(); toast("这条高亮已经不在了"); }
-        else toast("删除失败，请重试");
+        else failToast(res, "删除失败，请重试");
         return;
       }
       await load();
@@ -704,10 +725,11 @@
     const id = row && row.dataset.id;
     if (!kind || !id) return;
     await withLock(async () => {
-      const res = await API.runtime.sendMessage({ type: "clipkeep:trash-restore-one", payload: { kind, id } });
+      const res = await send({ type: "clipkeep:trash-restore-one", payload: { kind, id } });
       await load(); // 恢复成功与否都要重画明细，点了没反应的行不能继续留在列表里
       if (!res || !res.ok) {
-        toast(res && res.error === "not_found" ? "这条已经不在回收站里了（可能已过期）" : "恢复失败，请重试");
+        if (res && res.error === "not_found") toast("这条已经不在回收站里了（可能已过期）");
+        else failToast(res, "恢复失败，请重试");
         return;
       }
       const what = kind === "hl" ? "高亮" : "收藏";
@@ -719,10 +741,11 @@
     const entry = trash[0];
     if (!entry) return;
     await withLock(async () => {
-      const res = await API.runtime.sendMessage({ type: "clipkeep:trash-restore", tid: entry.tid });
+      const res = await send({ type: "clipkeep:trash-restore", tid: entry.tid });
       if (!res || !res.ok) {
         await load();
-        toast(res && res.error === "not_found" ? "该条目已过期，无法撤销" : "撤销失败，请重试");
+        if (res && res.error === "not_found") toast("该条目已过期，无法撤销");
+        else failToast(res, "撤销失败，请重试");
         return;
       }
       await load();
@@ -737,8 +760,9 @@
 
   $("btn-trash-clear").addEventListener("click", async () => {
     if (!confirm("清空回收站？清空后无法再撤销。")) return;
-    await API.runtime.sendMessage({ type: "clipkeep:trash-clear" });
+    const res = await send({ type: "clipkeep:trash-clear" });
     await load();
+    if (!res || !res.ok) return failToast(res, "清空回收站失败，请重试");
     toast("回收站已清空");
   });
 
@@ -776,7 +800,7 @@
   }
 
   async function applyTagOp(from, to) {
-    const res = await API.runtime.sendMessage({ type: "clipkeep:tag-op", payload: { from, to } });
+    const res = await send({ type: "clipkeep:tag-op", payload: { from, to } });
     if (!res || !res.ok) return toast("操作失败");
     if (activeTag === from) activeTag = to || "";
     await load();
@@ -1002,12 +1026,12 @@
     let res = null;
     try {
       // 排期 + 当日打卡由后台一次写链完成，不会出现「分数存了、热力图没加」
-      res = await API.runtime.sendMessage({ type: "clipkeep:grade", id, review: it.review });
+      res = await send({ type: "clipkeep:grade", id, review: it.review });
       await load(); // 以存储为准：保存失败时把本地改动丢掉，不留下和存储不一致的排期
     } finally {
       grading = false; // 刷新完成后才交还点击权；卡片重渲染后按钮自然是可用状态
     }
-    if (!res || !res.ok) toast("打分保存失败，已还原，请重试");
+    if (!res || !res.ok) failToast(res, "打分保存失败，已还原，请重试");
     else if (res.actFailed) toast("分数存好了，但今天的打卡记录没写进去（热力图会少这一条）");
   }
 
@@ -1157,9 +1181,9 @@
     const ids = [...selected];
     if (!ids.length) return;
     await withLock(async () => {
-      const res = await API.runtime.sendMessage({ type: "clipkeep:delete-many", ids });
+      const res = await send({ type: "clipkeep:delete-many", ids });
       await load(); // 以存储为准：删掉的 id 会在 renderBatchbar 里被剪掉
-      if (!res || !res.ok) return toast("批量删除失败，请重试");
+      if (!res || !res.ok) return failToast(res, "批量删除失败，请重试");
       // 一次能删的有上限，说清楚还剩多少，别让用户以为整批都干净了；
       // 回收站没写进去就没有「可撤销」可言，说了等于让人对着撤不回来的东西放心
       const undo = res.trashed === false ? "，但回收站没写进去，撤销不了" : "，可撤销";
@@ -1176,9 +1200,9 @@
     if (val === null) return;
     if (!val.trim()) return toast("没有输入标签");
     await withLock(async () => {
-      const res = await API.runtime.sendMessage({ type: "clipkeep:tag-add-many", ids, tags: val });
+      const res = await send({ type: "clipkeep:tag-add-many", ids, tags: val });
       await load();
-      if (!res || !res.ok) return toast("批量加标签失败，请重试");
+      if (!res || !res.ok) return failToast(res, "批量加标签失败，请重试");
       const n = Number(res.changed) || 0;
       const drop = Number(res.dropped) || 0;
       // 一次处理不完就说清楚，别报「已给 N 条加标签」让用户以为整批都改完了
@@ -1220,26 +1244,31 @@
       // 连点只认第一次：第二次对着已经消失的数据删除，提示就成了谎话
       await withLock(async () => {
         // 提示要跟着真实结果走：后台没写成功就不能报「已删除」
-        const res = await API.runtime.sendMessage({ type: "clipkeep:delete", id });
+        const res = await send({ type: "clipkeep:delete", id });
         await load();
-        // 三种结果三句话：真删了、这条早就不在了、写存储失败
-        toast(res && res.ok
-          ? (res.trashed === false ? "已删除，但回收站没写进去，这条撤销不了" : "已删除，可撤销")
-          : res && res.error === "not_found" ? "这条已经不在收藏里了"
-          : "删除失败，请重试");
+        // 三种结果三句话：真删了、这条早就不在了、写存储失败 / 后台失联
+        if (res && res.ok) {
+          toast(res.trashed === false ? "已删除，但回收站没写进去，这条撤销不了" : "已删除，可撤销");
+        } else if (res && res.error === "not_found") {
+          toast("这条已经不在收藏里了");
+        } else {
+          failToast(res, "删除失败，请重试");
+        }
       });
     }
     else if (act === "tag") {
       const val = prompt("输入标签，用逗号分隔：", (it.tags || []).join(","));
       if (val === null) return;
       await withLock(async () => {
-        const res = await API.runtime.sendMessage({ type: "clipkeep:update", id, patch: { tags: val } });
+        const res = await send({ type: "clipkeep:update", id, patch: { tags: val } });
         await load();
         // 每条最多 TAG_MAX 个标签，超出的会被后台舍弃：只说「标签已更新」听不出少了几
         const drop = res && Number(res.tagDropped) || 0;
-        toast(res && res.ok
-          ? (drop ? `标签已更新，${drop} 个超上限（最多 ${TAG_MAX} 个）没存进去` : "标签已更新")
-          : "保存失败，请重试");
+        if (res && res.ok) {
+          toast(drop ? `标签已更新，${drop} 个超上限（最多 ${TAG_MAX} 个）没进去` : "标签已更新");
+        } else {
+          failToast(res, "保存失败，请重试");
+        }
       });
     } else if (act === "export") {
       download(mdOf([it]), `clipkeep-${it.id}.md`);
@@ -1442,7 +1471,12 @@
     };
   }
 
-  const hlKeyOf = (h) => h.id || (h.url + "|" + h.text + "|" + h.createdAt);
+  /**
+   * 高亮的比对键按内容算，不按 id 算。
+   * id 在导入时可能被现场生成（备份里的 id 非法就换一个），拿 id 比等于每条都是新的，
+   * 同一份备份导第二次就把高亮翻倍；地址 + 正文 + 落点时间才是「同一条高亮」。
+   */
+  const hlKeyOf = (h) => `${h.url}|${h.text}|${h.createdAt}`;
   const HL_COLORS = ["yellow", "green", "pink", "blue"];
 
   /** 高亮记录同样是外部数据：id 白名单、颜色取合法值、字段补齐 */
@@ -1529,8 +1563,8 @@
 
   /** 两类内容都交给后台串行写；takenAt 让「覆盖」只作用于弹窗看到的那份快照 */
   async function writeBoth(itemsArr, hlArr, takenAt) {
-    const iRes = await API.runtime.sendMessage({ type: "clipkeep:replace", payload: { items: itemsArr, takenAt } });
-    const hRes = await API.runtime.sendMessage({ type: "clipkeep:hl-replace", payload: { highlights: hlArr, takenAt } });
+    const iRes = await send({ type: "clipkeep:replace", payload: { items: itemsArr, takenAt } });
+    const hRes = await send({ type: "clipkeep:hl-replace", payload: { highlights: hlArr, takenAt } });
     // 成败要各自带回去：没写成功却照报条数，就是当着用户的面说谎
     return {
       itemsOk: !!(iRes && iRes.ok),
@@ -1549,12 +1583,12 @@
     if (!pendingRestore) return;
     const p = pendingRestore;
     // 收藏交给 background 现读现写：弹窗开着时别的标签页存的内容不会被旧快照抹掉
-    const res = await API.runtime.sendMessage({ type: "clipkeep:merge", payload: { items: p.inItems } });
-    if (!res || !res.ok) return toast("合并失败，请重试");
+    const res = await send({ type: "clipkeep:merge", payload: { items: p.inItems } });
+    if (!res || !res.ok) return failToast(res, "合并失败，请重试");
     // 高亮同理：逐条走后台 upsert，不再拿旧快照整表回写
     let hlAdded = 0;
     for (const h of p.addHl) {
-      const r = await API.runtime.sendMessage({ type: "clipkeep:hl-add", payload: h });
+      const r = await send({ type: "clipkeep:hl-add", payload: h });
       if (r && r.ok && !r.dup) hlAdded++;
     }
     closeRestoreModal();
@@ -1591,11 +1625,12 @@
   $("btn-clear").addEventListener("click", async () => {
     if (!items.length) return toast("已经是空的了");
     if (confirm("确定清空全部收藏？此操作不可恢复（高亮批注不受影响）。")) {
-      await API.runtime.sendMessage({ type: "clipkeep:clear" });
-      // 既然提示了「不可恢复」，就别让回收站留着后门
-      await API.runtime.sendMessage({ type: "clipkeep:trash-clear" });
+      // 说了「不可恢复」就要真的不可恢复：先看收藏清没清，再看回收站关没关
+      const res = await send({ type: "clipkeep:clear" });
+      if (!res || !res.ok) { await load(); return failToast(res, "清空失败，收藏还在，请重试"); }
+      const t = await send({ type: "clipkeep:trash-clear" });
       await load();
-      toast("已清空");
+      toast(t && t.ok ? "已清空" : "收藏已清空，但回收站没关掉，撤销记录还在");
     }
   });
 

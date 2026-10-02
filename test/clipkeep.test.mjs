@@ -3773,6 +3773,61 @@ async function testV19Audit() {
     const t = p.$("toast").textContent;
     ok("合并提示带出被截断的条数", /截断/.test(t), t);
   }
+
+  /* 12. 差异识别按内容，不按重新生成的 id：同一份备份不能导两次翻一倍 */
+  {
+    const p = await mountPopup();
+    const bk = {
+      app: "ClipKeep", version: 1, items: [],
+      highlights: [{ url: "http://localhost/p", text: "没有 id 的高亮", color: "yellow", note: "", createdAt: 1 }],
+    };
+    await p.putBackup(bk);
+    await tick(30);
+    ok("第一次导入打开差异弹窗", p.$("modal").hidden === false, p.$("modal").hidden ? "直接关了" : "");
+    await p.click(p.$("modal-ok"));
+    await tick(40);
+    eq("第一次导入收下这条高亮", (p.store.clipkeep_highlights || []).length, 1);
+    await p.putBackup(bk);
+    await tick(30);
+    ok("第二次导入认出是同一条", /一致/.test(p.$("toast").textContent), p.$("toast").textContent);
+    eq("重导入不会把高亮翻倍", (p.store.clipkeep_highlights || []).length, 1);
+  }
+
+  /* 13. 后台 upsert 也按内容认条：换 id 重放不能堆出三条 */
+  {
+    const be = makeBackend();
+    const base = { url: "http://localhost/p", text: "叠加态", color: "yellow", note: "", createdAt: 1 };
+    const r1 = await be.send({ type: "clipkeep:hl-add", payload: { ...base, id: "stable-1" } });
+    const r2 = await be.send({ type: "clipkeep:hl-add", payload: { ...base, id: "stable-1" } });
+    const r3 = await be.send({ type: "clipkeep:hl-add", payload: { ...base } }); // 没有 id：后台自己生成
+    await tick(30);
+    ok("固定 id 重放被认出", r1 && r1.ok && r2 && r2.dup === true, JSON.stringify([r1, r2]));
+    ok("同一批内容换 id 也被认出", r3 && r3.dup === true, JSON.stringify(r3));
+    eq("存储里始终只有一条", (be.store.clipkeep_highlights || []).length, 1);
+  }
+
+  /* 14. 后台被换掉时（扩展刚更新），弹窗要说人话而不是静默失灵 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("d1", "失联时删除")] });
+    p.chrome.runtime.sendMessage = () => Promise.reject(new Error("Extension context invalidated."));
+    await p.click(p.q('.item [data-act="del"]'));
+    await tick(40);
+    const t = p.$("toast").textContent;
+    ok("后台失联时如实提示要重开弹窗", /重新打开|已更新/.test(t), t);
+    ok("失联时不说「已删除」", !/已删除/.test(t), t);
+  }
+
+  /* 15. 清空失败不能说「已清空」 */
+  {
+    const p = await mountPopup({ clipkeep_items: [mk("c1", "清空失败")] });
+    stubOne(p.chrome, "clipkeep:clear", { ok: false, error: "storage" });
+    p.w.confirm = () => true;
+    await p.click(p.$("btn-clear"));
+    await tick(40);
+    const t = p.$("toast").textContent;
+    ok("后台没写成功时不说「已清空」", !/已清空/.test(t), t);
+    ok("如实说清空失败", /失败|重试/.test(t), t);
+  }
 }
 
 /* ---------------- 4. 清单一致性 ---------------- */

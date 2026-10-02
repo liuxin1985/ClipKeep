@@ -302,7 +302,6 @@ function updateItem(id, patch) {
       tagDropped = ct.dropped; // 夹掉的条数只带在结果里，不进存储
     }
     if (p.note !== undefined) p.note = String(p.note).trim().slice(0, MAX_TEXT); // 备注和正文一样要夹：一条超长备注能把配额吃光
-    if (p.note !== undefined) p.note = String(p.note).trim().slice(0, MAX_TEXT); // 备注同样夹上限，一条能撑爆配额
     if (p.review !== undefined) {
       const rv = cleanReview(p.review); // 排期由后台复盘一遍，盒号/时间越界就夹回来
       if (rv) p.review = rv;
@@ -480,12 +479,21 @@ function cleanHighlight(payload) {
   };
 }
 
+/**
+ * 同一条高亮的身份：地址 + 正文 + 落点时间。
+ * id 不能只认——备份里的非法 id 会被换成新的，同一内容换个 id 再送一次
+ * 就不是「新的一条」，否则重复导入会把高亮越堆越多。
+ */
+const hlKeyOf = (h) => `${h.url}|${h.text}|${h.createdAt}`;
+
 function addHighlight(payload) {
   const hl = cleanHighlight(payload);
   if (!hl) return Promise.resolve({ ok: false, error: "invalid" });
   return mutateHl((list) => {
-    if (list.some((x) => x && x.id === hl.id)) {
-      return { result: { ok: true, id: hl.id, dup: true, count: list.length } };
+    const hit = list.find((x) => x && (x.id === hl.id || hlKeyOf(x) === hlKeyOf(hl)));
+    if (hit) {
+      // 报已有那条的 id：前端拿这个 id 去撤销 / 改色才对得上
+      return { result: { ok: true, id: hit.id, dup: true, count: list.length } };
     }
     list.push(hl);
     return { write: true, list, result: { ok: true, id: hl.id, count: list.length } };
