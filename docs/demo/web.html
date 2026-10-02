@@ -22,9 +22,17 @@
   const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_trash: [], clipkeep_activity: {}, clipkeep_prefs: {} };
   const clone = (v) => JSON.parse(JSON.stringify(v));
   const listeners = [];
+  const storageListeners = [];
   const dump = () => { document.getElementById("log").textContent = JSON.stringify(store.clipkeep_highlights, null, 1); };
   window.__ckStore = store;
   window.__ckDump = dump;
+  /** 真 API 里 set 之后一定会广播 onChanged，桩必须照做：content.js 的高亮重放就挂在这个事件上，
+      不广播的话截图页只能看到首次加载的那次重放，重叠高亮之类的同步路径根本拍不到。 */
+  const fireChanged = (obj) => {
+    const changes = {};
+    Object.keys(obj).forEach((k) => { changes[k] = { newValue: clone(store[k]) }; });
+    storageListeners.forEach((fn) => { try { fn(changes, "local"); } catch (_) {} });
+  };
   chrome = {
     storage: {
       local: {
@@ -35,9 +43,9 @@
           dump();
           return out;
         },
-        async set(obj) { Object.assign(store, clone(obj)); dump(); },
+        async set(obj) { Object.assign(store, clone(obj)); fireChanged(obj); dump(); },
       },
-      onChanged: { addListener() {} },
+      onChanged: { addListener(fn) { storageListeners.push(fn); } },
     },
     runtime: {
       sendMessage(msg, cb) {
