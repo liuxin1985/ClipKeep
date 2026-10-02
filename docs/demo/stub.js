@@ -63,7 +63,7 @@
     },
     runtime: {
       async sendMessage(msg) {
-        if (msg && msg.type === "clipkeep:trash-list") return { ok: true, entries: store.clipkeep_trash };
+        if (msg && msg.type === "clipkeep:trash-list") return { ok: true, items: store.clipkeep_trash };
         if (msg && msg.type === "clipkeep:delete") {
           const i = store.clipkeep_items.findIndex((x) => x.id === msg.id);
           if (i >= 0) {
@@ -96,10 +96,35 @@
         if (msg && msg.type === "clipkeep:trash-restore") {
           const hit = store.clipkeep_trash.filter((t) => t.tid === msg.tid);
           if (!hit.length) return { ok: false, error: "not_found" };
-          hit.forEach((e) => store.clipkeep_items.unshift(e.item));
+          let existed = 0;
+          hit.forEach((e) => {
+            if (store.clipkeep_items.some((x) => x.id === e.item.id)) { existed++; return; }
+            store.clipkeep_items.unshift(e.item);
+          });
           store.clipkeep_items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
           store.clipkeep_trash = store.clipkeep_trash.filter((t) => t.tid !== msg.tid);
-          return { ok: true, kind: hit[0].kind, restored: hit.length, exists: false };
+          return { ok: true, kind: hit[0].kind, restored: hit.length - existed, existed };
+        }
+        // 逐条恢复：与后台 trashRestoreOne 同口径（只认最近那条、撞 id 不重复插、记录一并清掉）
+        if (msg && msg.type === "clipkeep:trash-restore-one") {
+          const kind = msg.payload && msg.payload.kind;
+          const id = String((msg.payload && msg.payload.id) || "");
+          if ((kind !== "clip" && kind !== "hl") || !/^[\w-]{1,64}$/.test(id)) return { ok: false, error: "invalid" };
+          const idx = store.clipkeep_trash.findIndex((t) => t && t.kind === kind && t.item && t.item.id === id);
+          if (idx === -1) return { ok: false, error: "not_found" };
+          const entry = store.clipkeep_trash[idx];
+          const key = kind === "hl" ? "clipkeep_highlights" : "clipkeep_items";
+          const list = store[key];
+          const dup = list.some((x) => x && x.id === entry.item.id);
+          if (!dup) {
+            if (kind === "hl") list.push(entry.item);
+            else {
+              list.unshift(entry.item);
+              list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+            }
+          }
+          store.clipkeep_trash.splice(idx, 1);
+          return { ok: true, kind, id, restored: dup ? 0 : 1, existed: dup ? 1 : 0 };
         }
         if (msg && msg.type === "clipkeep:grade") {
           const it = store.clipkeep_items.find((x) => x.id === msg.id);

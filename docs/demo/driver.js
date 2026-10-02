@@ -5,6 +5,7 @@
   const qa = (s) => [...document.querySelectorAll(s)];
   const click = (el) => el && el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const key = (k) => document.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /** 轮询等条件成立：界面数据都是异步 load 回来的，抢跑会拍到空列表 */
   function until(pred, timeout = 3000) {
@@ -72,6 +73,15 @@
       await until(listReady);
       key("?");
       await until(() => q("#keys-help") && !q("#keys-help").hidden);
+    },
+    trash: async () => {
+      await until(listReady);
+      click(q('#list .item [data-act="del"]')); // 删两条，分属两个撤销号
+      await wait(200);
+      click(q('#list .item [data-act="del"]'));
+      await until(() => q("#trashbar") && !q("#trashbar").hidden);
+      click(q("#btn-trash-detail")); // 展开明细，逐条恢复
+      await until(() => qa(".trash-row").length > 0);
     },
     dark: async () => {
       await until(listReady);

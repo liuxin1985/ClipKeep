@@ -18,6 +18,7 @@
   const INTERVALS = [0, 1, 3, 7, 21, 90]; // 各记忆盒对应的复习间隔（天）
   const HEAT_WEEKS = 8; // 热力图展示最近 8 周
   const HEAT_ROWS_MAX = 100; // 格子下钻最多渲染多少条明细（和后台 ACT_IDS_MAX 对齐）
+  const TRASH_DETAIL_MAX = 50; // 回收站明细一次最多列几行，超出如实说还有多少
   const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长
   const DEFAULT_TRASH_MINS = 10;
   const KIND_LABELS = { text: "文字", image: "图片", link: "链接" }; // 列表筛选 chip 的文案
@@ -48,6 +49,7 @@
   const modalEl = $("modal");
   const trashbarEl = $("trashbar");
   const trashTextEl = $("trash-text");
+  const trashListEl = $("trash-list");
   const batchEl = $("batchbar");
   const batchTextEl = $("batch-text");
   const filterEl = $("filterbar");
@@ -56,6 +58,7 @@
   let items = [];
   let marks = []; // 网页高亮 / 批注
   let trash = []; // 最近删除的收藏 / 高亮，保留时长见设置
+  let trashDetailOpen = false; // 回收站明细是否展开
   let activity = {}; // { "2026-09-27": 5 } 每日回顾条数
   let prefs = DEFAULT_PREFS;
   let activeTag = "";
@@ -639,11 +642,77 @@
 
   function renderTrashbar() {
     trashbarEl.hidden = trash.length === 0;
-    if (!trash.length) return;
+    if (!trash.length) {
+      trashListEl.hidden = true;
+      trashListEl.innerHTML = "";
+      return;
+    }
     const kinds = new Set(trash.map((t) => (t && t.kind === "hl" ? "高亮" : "收藏")));
     const what = kinds.size === 1 ? [...kinds][0] : "";
     trashTextEl.textContent = `已删除 ${trash.length} 条${what} · ${trashMins()} 分钟内可撤销`;
+    // 「撤销」只还原最近一批（同一个撤销号），回收站里可能还压着更早的批次。
+    // 只写「撤销」配一句「已删除 5 条」，用户会以为点一下全回来，实际只捞回 2 条。
+    const latestTid = trash[0] && trash[0].tid;
+    const latest = trash.filter((t) => t && t.tid === latestTid).length;
+    const batches = new Set(trash.map((t) => t && t.tid)).size;
+    const undoBtn = $("btn-undo");
+    undoBtn.textContent = batches > 1 ? `撤销这批 ${latest} 条` : "撤销";
+    undoBtn.title = batches > 1 ? `回收站里还有更早的 ${trash.length - latest} 条，逐条恢复请点「明细」` : "";
+    $("btn-trash-detail").textContent = trashDetailOpen ? "收起" : "明细";
+    renderTrashDetail();
   }
+
+  /**
+   * 回收站明细。「撤销」是按撤销号整批还原的，一次删了 20 条又只想捞回其中一条时
+   * 别无可选，所以逐条列出、逐条恢复。列表新→旧，最多列 TRASH_DETAIL_MAX 行，
+   * 超出如实说明条数，不让人误以为回收站里就只有这些。
+   */
+  function renderTrashDetail() {
+    trashListEl.hidden = !trashDetailOpen;
+    if (!trashDetailOpen) {
+      trashListEl.innerHTML = "";
+      return;
+    }
+    const rows = trash.slice(0, TRASH_DETAIL_MAX).map((t) => {
+      const it = (t && t.item) || {};
+      const kind = t.kind === "hl" ? "hl" : "clip";
+      const label = kind === "hl" ? "高亮" : "收藏";
+      const text = String(it.text || "（无正文）");
+      return `<div class="trash-row" data-kind="${kind}" data-id="${esc(it.id || "")}">`
+        + `<span class="tr-kind">${label}</span>`
+        + `<span class="tr-text">${esc(text)}</span>`
+        + `<button class="mini-btn" data-act="trash-restore-one">恢复</button>`
+        + `</div>`;
+    }).join("");
+    const more = trash.length > TRASH_DETAIL_MAX
+      ? `<p class="tr-more">另有 ${trash.length - TRASH_DETAIL_MAX} 条未列出（只列最近 ${TRASH_DETAIL_MAX} 条）</p>`
+      : "";
+    trashListEl.innerHTML = rows + more;
+  }
+
+  $("btn-trash-detail").addEventListener("click", () => {
+    trashDetailOpen = !trashDetailOpen;
+    renderTrashbar();
+  });
+
+  trashListEl.addEventListener("click", async (e) => {
+    const btn = e.target.closest && e.target.closest('[data-act="trash-restore-one"]');
+    if (!btn) return;
+    const row = btn.closest(".trash-row");
+    const kind = row && row.dataset.kind;
+    const id = row && row.dataset.id;
+    if (!kind || !id) return;
+    await withLock(async () => {
+      const res = await API.runtime.sendMessage({ type: "clipkeep:trash-restore-one", payload: { kind, id } });
+      await load(); // 恢复成功与否都要重画明细，点了没反应的行不能继续留在列表里
+      if (!res || !res.ok) {
+        toast(res && res.error === "not_found" ? "这条已经不在回收站里了（可能已过期）" : "恢复失败，请重试");
+        return;
+      }
+      const what = kind === "hl" ? "高亮" : "收藏";
+      toast(Number(res.restored) > 0 ? `已恢复 1 条${what} ✓` : `这条${what}已经在列表里了，未重复添加`);
+    });
+  });
 
   $("btn-undo").addEventListener("click", async () => {
     const entry = trash[0];

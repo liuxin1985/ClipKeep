@@ -3160,6 +3160,185 @@ async function testOverlappingMarks() {
   }
 }
 
+/* ---------------- 3w. 回收站明细与逐条恢复 ---------------- */
+
+async function testTrashDetail() {
+  console.log("\n[3w] 回收站明细：逐条恢复、只回点那条、恢复完自动收起");
+  const now = Date.now();
+  const mk = (id, text) => ({ id, text, note: "", tags: ["甲"], url: "http://x/1", title: "页面", createdAt: now - 1000 });
+  const hl = (id, text) => ({ id, url: "http://x/1", title: "页面", text, color: "yellow", note: "", createdAt: now });
+  const stubOne = (chrome, type, res) => {
+    const orig = chrome.runtime.sendMessage.bind(chrome);
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (!msg || msg.type !== type) return orig(msg, cb);
+      if (typeof cb === "function") cb(res);
+      return Promise.resolve(res);
+    };
+  };
+
+  /* 1. 批量删的三条共用一个撤销号，逐条恢复只回点的那一条 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("a", "甲"), mk("b", "乙"), mk("c", "丙")];
+    const del = await be.send({ type: "clipkeep:delete-many", ids: ["a", "b", "c"] });
+    ok("批量删除成功", del.ok === true && be.store.clipkeep_items.length === 0);
+    eq("三条共用一个撤销号", new Set(be.store.clipkeep_trash.map((t) => t.tid)).size, 1);
+    const one = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "clip", id: "b" } });
+    ok("逐条恢复成功", one.ok === true);
+    eq("只回一条", one.restored, 1);
+    eq("列表里只有恢复的那条", be.store.clipkeep_items.map((x) => x.id).join(","), "b");
+    eq("回收站还剩两条", be.store.clipkeep_trash.length, 2);
+    eq("剩下的还是同批的撤销号", new Set(be.store.clipkeep_trash.map((t) => t.tid)).size, 1);
+    // 整批撤销仍然能把剩下的都捞回来
+    const rest = await be.send({ type: "clipkeep:trash-restore", tid: be.store.clipkeep_trash[0].tid });
+    eq("剩下的整批撤销回来", rest.restored, 2);
+    eq("三条都到齐了", be.store.clipkeep_items.length, 3);
+    eq("回收站清空", be.store.clipkeep_trash.length, 0);
+  }
+
+  /* 2. 明细里没有的 id 不能谎报恢复 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_items = [mk("a", "甲")];
+    await be.send({ type: "clipkeep:delete", id: "a" });
+    const miss = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "clip", id: "nope" } });
+    ok("未命中报 not_found", miss.ok === false && miss.error === "not_found");
+    eq("未命中不改动回收站", be.store.clipkeep_trash.length, 1);
+    eq("未命中不改动列表", be.store.clipkeep_items.length, 0);
+    const bad = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "whatever", id: "a" } });
+    ok("类型不合法被拒", bad.ok === false && bad.error === "invalid");
+    const noid = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "clip" } });
+    ok("缺 id 被拒", noid.ok === false && noid.error === "invalid");
+  }
+
+  /* 3. 同一条被删了两次：逐条恢复一次只消掉一条记录 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_trash = [
+      { tid: "T1", kind: "clip", item: mk("dup", "重复删的"), deletedAt: now },
+      { tid: "T2", kind: "clip", item: mk("dup", "重复删的"), deletedAt: now - 1000 },
+    ];
+    const r = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "clip", id: "dup" } });
+    ok("第一次恢复成功", r.ok === true && r.restored === 1);
+    eq("还剩一条同名记录", be.store.clipkeep_trash.length, 1);
+    eq("留下的是更早那条", be.store.clipkeep_trash[0].tid, "T2");
+    // 再恢复会撞上已经回来的 id：不重复插入，但要把记录清掉，否则明细里永远留着一行死条目
+    const again = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "clip", id: "dup" } });
+    ok("撞 id 时如实说明没恢复", again.ok === true && again.restored === 0 && again.existed === 1);
+    eq("列表里不会长出第二条", be.store.clipkeep_items.length, 1);
+    eq("撞 id 的记录也从回收站清掉", be.store.clipkeep_trash.length, 0);
+  }
+
+  /* 4. 高亮同样可以逐条恢复；过期的一律捞不回来 */
+  {
+    const be = makeBackend();
+    be.store.clipkeep_highlights = [hl("h1", "第一条高亮"), hl("h2", "第二条高亮")];
+    await be.send({ type: "clipkeep:hl-delete", id: "h1" });
+    await be.send({ type: "clipkeep:hl-delete", id: "h2" });
+    eq("两条高亮进了回收站", be.store.clipkeep_trash.length, 2);
+    const r = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "hl", id: "h2" } });
+    ok("高亮逐条恢复成功", r.ok === true && r.kind === "hl");
+    eq("只回那条高亮", be.store.clipkeep_highlights.map((x) => x.id).join(","), "h2");
+    eq("收藏列表不受牵连", be.store.clipkeep_items.length, 0);
+    // 让剩下那条过期
+    be.store.clipkeep_trash[0].deletedAt = now - 999 * 60 * 1000;
+    const gone = await be.send({ type: "clipkeep:trash-restore-one", payload: { kind: "hl", id: "h1" } });
+    ok("过期的捞不回来", gone.ok === false && gone.error === "not_found");
+    eq("过期的高亮没被偷偷塞回列表", be.store.clipkeep_highlights.length, 1);
+  }
+
+  /* 5. 弹窗：明细展开后逐条列出，点一行只恢复那一行 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [mk("k1", "保留的收藏"), mk("k2", "被删的第一条"), mk("k3", "被删的第二条")],
+      clipkeep_highlights: [],
+      clipkeep_trash: [],
+    });
+    await p.click(p.q('.tab[data-view="clips"]'));
+    await p.click(p.q('.item[data-id="k2"] [data-act="del"]'));
+    await p.click(p.q('.item[data-id="k3"] [data-act="del"]'));
+    await tick(20);
+    eq("两条待撤销", p.store.clipkeep_trash.length, 2);
+    ok("默认不展开明细", p.$("trash-list").hidden === true);
+    await p.click(p.$("btn-trash-detail"));
+    ok("点明细展开", p.$("trash-list").hidden === false);
+    const rows = p.qa(".trash-row");
+    eq("明细逐条列出", rows.length, 2);
+    ok("明细写清类型", /收藏|高亮/.test(rows[0].textContent), rows[0].textContent);
+    ok("明细带原文，认得出是哪条", rows.some((r) => /被删的第一条/.test(r.textContent)) &&
+       rows.some((r) => /被删的第二条/.test(r.textContent)), p.$("trash-list").textContent);
+    const target = rows.find((r) => /被删的第一条/.test(r.textContent));
+    await p.click(target.querySelector('[data-act="trash-restore-one"]'));
+    await tick(30);
+    ok("提示说清恢复了什么类型几条", /已恢复 1 条收藏/.test(p.$("toast").textContent), p.$("toast").textContent);
+    eq("列表里只回到那一条（保留的一条 + 恢复的一条）", p.qa(".item").length, 2);
+    ok("没点的那条仍在回收站", /被删的第二条/.test(p.$("trash-list").textContent), p.$("trash-list").textContent);
+    eq("明细少了一行", p.qa(".trash-row").length, 1);
+    await p.click(p.q('.trash-row [data-act="trash-restore-one"]'));
+    await tick(30);
+    ok("全部恢复完收起回收站", p.$("trashbar").hidden === true);
+    eq("三条都回来了", p.store.clipkeep_items.length, 3);
+  }
+
+  /* 5b. 明细有行数上限，超出部分如实说明，不让人误以为回收站里就只有这些 */
+  {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      tid: "T" + i, kind: "clip", item: mk("m" + i, "第" + i + "条"), deletedAt: now,
+    }));
+    const p = await mountPopup({ clipkeep_items: [], clipkeep_trash: many });
+    await p.click(p.$("btn-trash-detail"));
+    await tick(20);
+    eq("明细最多列 50 行", p.qa(".trash-row").length, 50);
+    ok("超出部分如实说明", /另有 10 条/.test(p.$("trash-list").textContent), p.$("trash-list").textContent.slice(-120));
+    ok("回收站条数按真实总数报", /已删除 60 条/.test(p.$("trash-text").textContent), p.$("trash-text").textContent);
+  }
+
+  /* 6. 后台说没恢复成，提示就不能说「已恢复」 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [],
+      clipkeep_trash: [{ tid: "T", kind: "clip", item: mk("z1", "早就没了的"), deletedAt: Date.now() }],
+    });
+    stubOne(p.chrome, "clipkeep:trash-restore-one", { ok: false, error: "not_found" });
+    await p.click(p.$("btn-trash-detail"));
+    await tick(20);
+    const btn = p.q('.trash-row [data-act="trash-restore-one"]');
+    ok("明细里有恢复按钮", !!btn);
+    await p.click(btn);
+    await tick(30);
+    const t = p.$("toast").textContent;
+    ok("未命中不报已恢复", !/已恢复/.test(t), t);
+    ok("未命中说清去向", /不在回收站|已过期|无法恢复/.test(t), t);
+  }
+
+  /* 7. 撤销只管最近一批：跨批时按钮标签要写清「这批」，别让人以为整条回收站都会回来 */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [],
+      clipkeep_trash: [
+        { tid: "T2", kind: "clip", item: mk("n1", "最近一批甲"), deletedAt: now },
+        { tid: "T2", kind: "clip", item: mk("n2", "最近一批乙"), deletedAt: now },
+        { tid: "T1", kind: "clip", item: mk("o1", "更早一批"), deletedAt: now - 1000 },
+      ],
+    });
+    const label = p.$("btn-undo").textContent;
+    ok("跨两批时撤销写清只管这批", /这批/.test(label), label);
+    ok("按钮上写出这批的真实条数", /2/.test(label), label);
+    ok("提示去哪找剩下的那条", /明细/.test(p.$("btn-undo").title), p.$("btn-undo").title);
+    await p.click(p.$("btn-undo"));
+    await tick(30);
+    eq("点撤销确实只回来最近那批", p.store.clipkeep_items.length, 2);
+    eq("更早那批仍留在回收站", p.store.clipkeep_trash.length, 1);
+  }
+  {
+    const p = await mountPopup({
+      clipkeep_items: [],
+      clipkeep_trash: [{ tid: "T", kind: "clip", item: mk("s1", "只删了一条"), deletedAt: now }],
+    });
+    eq("只有一批时按钮仍叫撤销", p.$("btn-undo").textContent, "撤销");
+  }
+}
+
 /* ---------------- 3u. v1.8 审计：未命中删除 / 批量上限 / 覆盖失败 / 撤销计数 / 截断 ---------------- */
 
 async function testV18Audit() {
@@ -3416,7 +3595,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testV17Audit, testV18Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testManifests];
   for (const s of suites) {
     try {
       await s();

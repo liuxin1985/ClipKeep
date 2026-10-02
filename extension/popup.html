@@ -116,8 +116,11 @@
     <!-- 删除撤销条 -->
     <section class="trashbar" id="trashbar" hidden>
       <span class="trash-text" id="trash-text">已删除 1 条 · 10 分钟内可撤销</span>
+      <button id="btn-trash-detail" class="mini-btn" title="逐条查看回收站，单独恢复某一条">明细</button>
       <button id="btn-undo" class="mini-btn primary">撤销</button>
       <button id="btn-trash-clear" class="mini-btn">清空</button>
+      <!-- 明细：整批撤销只能一次全捞回来，想只恢复其中一条时靠这里 -->
+      <div class="trash-list" id="trash-list" hidden></div>
     </section>
 
     <!-- 收藏视图 -->

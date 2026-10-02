@@ -492,6 +492,39 @@ function trashClear() {
 }
 
 /**
+ * 逐条恢复：回收站明细里点某一行的「恢复」。
+ * 按 tid 的整批撤销会把同一次删除的全都捞回来，只想恢复其中一条时做不到；
+ * 这里只认 (kind, id) 最近的那条记录（回收站是新→旧排的，findIndex 即最近），
+ * 捞完剩下的继续留在回收站里，还能再点或整批撤销。
+ * 撞 id（内容已经回到列表）时不重复插入，但那条记录要一并清掉——
+ * 留在明细里就是一行点不动的死条目。
+ */
+function trashRestoreOne(payload) {
+  const kind = payload && payload.kind;
+  const id = String((payload && payload.id) || "");
+  if ((kind !== "clip" && kind !== "hl") || !SAFE_ID.test(id)) {
+    return Promise.resolve({ ok: false, error: "invalid" });
+  }
+  return mutateTrash(async (trash) => {
+    const next = pruneTrash(trash, await trashTtlMs()); // 过期的一律先清掉，过期的东西不该还能恢复
+    const idx = next.findIndex((t) => t && t.kind === kind && t.item && t.item.id === id);
+    if (idx === -1) {
+      return { write: next.length !== trash.length, list: next, result: { ok: false, error: "not_found" } };
+    }
+    const entry = next[idx];
+    const res = await restoreEntry(entry);
+    if (!res || !res.ok) return { write: true, list: next, result: { ok: false, error: "restore_failed" } };
+    const rest = next.slice();
+    rest.splice(idx, 1);
+    return {
+      write: true,
+      list: rest,
+      result: { ok: true, kind, id, restored: res.exists ? 0 : 1, existed: res.exists ? 1 : 0 },
+    };
+  });
+}
+
+/**
  * 标签操作：重命名 / 合并（to 已存在时即合并去重）/ 删除（to 传空串）
  */
 function tagOp(payload) {
@@ -769,6 +802,9 @@ if (API.runtime && API.runtime.onMessage) {
             break;
           case "clipkeep:trash-restore":
             sendResponse(await trashRestore(msg.tid));
+            break;
+          case "clipkeep:trash-restore-one":
+            sendResponse(await trashRestoreOne(msg.payload));
             break;
           case "clipkeep:trash-clear":
             sendResponse(await trashClear());
