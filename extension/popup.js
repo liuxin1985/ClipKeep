@@ -284,6 +284,31 @@
     applyTheme(dark ? "dark" : "light");
   }
 
+  /**
+   * chip 这类整条重绘的小控件，重绘前后要把焦点放回原来那个：
+   * 否则键盘用户 Tab 到筛选条按回车，焦点掉回页面顶部，得重新 Tab 一遍。
+   * 只在焦点原本就在这个容器里时才接管，不会把搜索框的光标抢走。
+   */
+  function chipKey(el) {
+    const d = el && el.dataset;
+    if (!d) return "";
+    if (d.kind !== undefined) return "kind:" + d.kind;
+    if (d.site !== undefined) return "site:" + d.site;
+    if (d.tag !== undefined) return "tag:" + d.tag;
+    return "";
+  }
+
+  function keepChipFocus(container) {
+    const a = document.activeElement;
+    return a && container.contains(a) ? chipKey(a) : "";
+  }
+
+  function restoreChipFocus(container, key) {
+    if (!key) return;
+    const next = [...container.querySelectorAll(".chip")].find((c) => chipKey(c) === key);
+    if (next) next.focus();
+  }
+
   function allTags() {
     const set = new Set();
     items.forEach((it) => (it.tags || []).forEach((t) => set.add(t)));
@@ -293,9 +318,11 @@
   function renderTags() {
     const tags = allTags();
     if (activeTag && !tags.includes(activeTag)) activeTag = "";
+    const keep = keepChipFocus(tagsEl);
     tagsEl.innerHTML = tags
       .map((t) => `<button class="chip ${t === activeTag ? "active" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`)
       .join("");
+    restoreChipFocus(tagsEl, keep);
   }
 
   /**
@@ -304,6 +331,7 @@
    * chip 只列库里真存在的值，数据一变（比如最后一条图片被删）幽灵选项就跟着消失。
    */
   function renderFilterbar() {
+    const keep = keepChipFocus(filterEl); // 先记焦点，下面每次 innerHTML 都会把它抹掉
     if (view !== "clips") {
       filterEl.hidden = true;
       filterEl.innerHTML = "";
@@ -341,6 +369,7 @@
             ? `<span class="f-more" title="还有 ${sorted.length - shown.length} 个站点没有列出，用搜索找它们的域名">+${sorted.length - shown.length} 站</span>`
             : "");
     filterEl.innerHTML = kindHtml + siteHtml;
+    restoreChipFocus(filterEl, keep);
   }
 
   function filtered() {

@@ -2771,6 +2771,23 @@ async function testKindSiteFilter() {
     await p.click(p.q('.tab[data-view="clips"]'));
     ok("切回收藏视图筛选还在", p.rows().length === 1, "用户没理由被悄悄清掉筛选");
   }
+
+  /* 用 Tab 走到 chip 上按回车：整条重绘不能把焦点丢回页面顶部 */
+  {
+    const p = await open(filterSeed());
+    p.byKind("image").focus();
+    await p.click(p.byKind("image"));
+    ok("点类型 chip 后焦点留在筛选条", p.q("#filterbar").contains(p.w.document.activeElement),
+       "焦点掉了，键盘用户得从页头重新 Tab 一遍");
+    p.bySite("csrc.nist.gov").focus();
+    await p.click(p.bySite("csrc.nist.gov"));
+    ok("点站点 chip 后焦点还在同一个 chip 上",
+       (p.w.document.activeElement || {}).dataset && p.w.document.activeElement.dataset.site === "csrc.nist.gov");
+    const tag = p.qa("#tags .chip").find((c) => c.dataset.tag === "密码");
+    tag.focus();
+    await p.click(tag);
+    ok("点标签 chip 后焦点留在标签条", p.q("#tags").contains(p.w.document.activeElement));
+  }
 }
 
 /* ---------------- 3v. v1.8：列表键盘流与快捷键帮助 ---------------- */
