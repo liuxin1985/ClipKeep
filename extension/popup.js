@@ -1491,6 +1491,8 @@
       note: String(h.note || ""),
       color: HL_COLORS.indexOf(h.color) >= 0 ? h.color : "yellow",
       createdAt: Number(h.createdAt) || Date.now(),
+      // 分段锚点原样带过去，是不是真的自洽由后台 cleanSegs 这把尺子量（后台才是信任边界）
+      ...(Array.isArray(h.segs) && h.segs.length ? { segs: h.segs } : {}),
     };
   }
 

@@ -3879,13 +3879,339 @@ async function testV19Audit() {
     btn.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
     await tick(60);
     const t = c.toastText();
-    ok("跨元素高亮如实说明刷新后可能不显示", /跨元素|刷新/.test(t), t);
-    ok("不能只报一句「已高亮 ✓」就完事", !/^已高亮 ✓$/.test(t), t);
-    eq("记录确实存进了存储", (c.store.clipkeep_highlights || []).length, 1);
-    // 现状如实记录：重放只在单个文本节点里整段查找，跨节点的这段找不到标记
-    eq("重放后页面上没有标记（本版已知限制）", c.marks().length, 0);
+    ok("记录确实存进了存储", (c.store.clipkeep_highlights || []).length, 1);
+    // v1.9 这里断言的是「重放不回来，所以创建时必须说跨元素」；v1.10 有了分段锚点，
+    // 这句保留话术就成了谎话——完整覆盖见 [3t] 跨节点锚定
+    ok("锚定成功后不再说「刷新后可能不显示」", !/跨元素|可能不显示/.test(t), t);
+    eq("重放后页面上有标记（跨节点锚定生效）", c.marks().length, 2);
   }
 }
+
+/* ---------------- 3t. v1.10 跨节点高亮锚定 ---------------- */
+
+async function testV110Anchor() {
+  console.log("\n[3t] 跨节点锚定：分段定位 / 上下文消歧 / 段序约束 / 旧记录兼容");
+  const now = Date.now();
+  const H = (url, id, text, extra) => ({
+    id, url, title: "页面", text, color: "green", note: "", createdAt: now, ...(extra || {}),
+  });
+  // 划选 → 点工具条 🖍，返回这条落库后的记录
+  async function mark(c, range) {
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    const btn = c.w.document.querySelector(".clipkeep-btn-hl");
+    if (!btn) return null;
+    btn.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    return (c.store.clipkeep_highlights || [])[0] || null;
+  }
+  const rangeIn = (c, startNode, so, endNode, eo) => {
+    const r = c.w.document.createRange();
+    r.setStart(startNode, so);
+    r.setEnd(endNode, eo);
+    return r;
+  };
+
+  /* 1. 跨元素选区：拆成按节点的分段锚点，刷新后两段都要重放回来 */
+  {
+    const url = "http://localhost/anchor1";
+    // 第一段故意从 <strong> 中间开始，这样它的「上文」才是同一个文本节点里的字
+    const html = `<p>简介：<strong>所谓量子比特</strong>可以叠加，这是并行性的来源。</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.firstChild, 2, strong.nextSibling, 4));
+    ok("跨元素选区确实建了高亮", !!rec, "浮动条或写入链路没走通");
+    const t = c.toastText();
+    ok("锚定成功后不再需要「跨元素」保留话术", !!rec && !/跨元素|可能不显示/.test(t), t);
+    eq("按文本节点拆成两段", (rec.segs || []).length, 2);
+    eq("分段拼接与正文自洽", (rec.segs || []).map((s) => s.t).join(""), rec.text);
+    eq("第一段带上文", (rec.segs || [])[0] && rec.segs[0].pre, "所谓");
+    eq("第二段带下文", (rec.segs || [])[1] && rec.segs[1].post, "，这是并行性的来源。");
+    // 重新挂载 = 刷新这一页
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    eq("刷新后两段都重放回来", c2.marks().length, 2);
+    eq("两段属于同一条记录", new Set(c2.marks().map((m) => m.dataset.hlid)).size, 1);
+    ok("原文一个字都没丢", c2.bodyText() === "简介：所谓量子比特可以叠加，这是并行性的来源。", c2.bodyText());
+    ok("标记落在正确的字上", c2.marks().map((m) => m.textContent).join("|") === "量子比特|可以叠加",
+      c2.marks().map((m) => m.textContent).join("|"));
+  }
+
+  /* 2. 页面里有两处一模一样的话：锚点上下文决定落在哪一处 */
+  {
+    const url = "http://localhost/anchor2";
+    const html = `<p>第一段：量子比特很脆弱。</p><p>第二段：量子比特很脆弱。</p>`;
+    const c = mountContent(url, [], html);
+    const ps = c.w.document.querySelectorAll("p");
+    const second = ps[1].firstChild; // 「第二段：量子比特很脆弱。」
+    const rec = await mark(c, rangeIn(c, second, 4, second, 8));
+    eq("正文是第二段那句话", rec && rec.text, "量子比特");
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    eq("只重放出一个标记", c2.marks().length, 1);
+    const parent = c2.marks()[0] && c2.marks()[0].closest("p");
+    ok("标记落在第二段而不是第一段", parent === ps[1] || (parent && /第二段/.test(parent.textContent)),
+      parent && parent.textContent);
+  }
+
+  /* 3. 段序约束：后一段必须落在前一段之后，短段不能错配到别处 */
+  {
+    const url = "http://localhost/anchor3";
+    const html = `<p>量子<strong>比特</strong>量子</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const first = strong.previousSibling;
+    const rec = await mark(c, rangeIn(c, first, 0, strong.firstChild, 2));
+    eq("选中的是开头的「量子比特」", rec && rec.text, "量子比特");
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    eq("两段各自落地", c2.marks().length, 2);
+    eq("末尾那个「量子」没被误标", c2.marks().filter((m) => m.textContent === "量子").length, 1);
+    const p3 = c2.w.document.querySelector("article p");
+    ok("标的是开头那个「量子」而不是末尾那个", p3.firstChild === c2.marks().find((m) => m.textContent === "量子"),
+      p3.innerHTML);
+    ok("末尾的「量子」仍是裸文本", p3.lastChild.nodeType === 3 && p3.lastChild.nodeValue === "量子", p3.innerHTML);
+    ok("原文完整", c2.bodyText() === "量子比特量子", c2.bodyText());
+  }
+
+  /* 4. 旧记录没有 segs：仍按整段单节点查找，行为与 v1.9 一致 */
+  {
+    const url = "http://localhost/anchor4";
+    const html = `<p>已经存过的句子，后面还有字。</p>`;
+    const c = mountContent(url, [H(url, "old1", "存过的句子")], html);
+    await tick(30);
+    eq("没有 segs 的旧记录照样重放", c.marks().length, 1);
+    eq("重放出的文字没变", c.marks()[0] && c.marks()[0].textContent, "存过的句子");
+  }
+
+  /* 5. 页面文字被改过：宁可一个都不标，也不能只标一半 */
+  {
+    const url = "http://localhost/anchor5";
+    const html = `<p>简介：<strong>量子比特</strong>可以叠加</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.previousSibling, 3, strong.nextSibling, 4));
+    eq("确实存下了两段锚点", (rec.segs || []).length, 2);
+    // 刷新后页面被人改了一个字：第一段找不到，第二段还在
+    const c2 = mountContent(url, [rec], `<p>简介：<strong>量子比特</strong>可以部署</p>`);
+    await tick(30);
+    eq("部分锚点失配时整条不落地（不留下半条高亮）", c2.marks().length, 0);
+    ok("原文一个字都没丢", c2.bodyText() === "简介：量子比特可以部署", c2.bodyText());
+  }
+
+  /* 6. 后台是信任边界：来料 segs 要清洗，但拼接对不上正文的 segs 整份作废 */
+  {
+    const be = makeBackend();
+    const r = await be.send({
+      type: "clipkeep:hl-add",
+      payload: {
+        url: "http://a/x", title: "T", text: "量子比特", color: "green", createdAt: 1,
+        segs: [
+          { t: "量子", pre: "上".repeat(300), post: 42 },
+          { t: "", pre: "空段该丢", post: "" },
+          { t: "比特", pre: null, post: "下".repeat(300), evil: "<script>" },
+        ],
+      },
+    });
+    await tick(20);
+    eq("后台收下这条", r.ok, true);
+    const stored = (be.store.clipkeep_highlights || [])[0] || {};
+    const segs = stored.segs || [];
+    eq("脏字段不影响有效段被留下", segs.length, 2);
+    ok("上下文截到 24 字", segs.every((s) => s.pre.length <= 24 && s.post.length <= 24),
+      JSON.stringify(segs.map((s) => [s.pre.length, s.post.length])));
+    ok("非字符串上下文变成空串", segs.every((s) => typeof s.pre === "string" && typeof s.post === "string"));
+    ok("未知字段不入库", segs.every((s) => !("evil" in s)), JSON.stringify(segs[0]));
+    eq("清洗后拼接仍等于正文", segs.map((s) => s.t).join(""), stored.text);
+  }
+
+  /* 6b. 拼接不出正文的 segs 是谎话：整份作废，退回单段查找，别拿它去标别的字 */
+  {
+    const be = makeBackend();
+    await be.send({
+      type: "clipkeep:hl-add",
+      payload: {
+        url: "http://a/y", title: "T", text: "量子比特", color: "green", createdAt: 2,
+        segs: [{ t: "完全", pre: "", post: "" }, { t: "不相干", pre: "", post: "" }],
+      },
+    });
+    await tick(20);
+    const stored = (be.store.clipkeep_highlights || []).find((x) => x.url === "http://a/y") || {};
+    eq("正文照旧收下", stored.text, "量子比特");
+    ok("对不上正文的 segs 被整份丢掉", !Array.isArray(stored.segs) || stored.segs.length === 0,
+      JSON.stringify(stored.segs));
+    // 段数上限同样按「作废」处理：截断 segs 会让它更拼不回正文，不如退回单段
+    await be.send({
+      type: "clipkeep:hl-add",
+      payload: {
+        url: "http://a/z", title: "T", text: "x0x1x2", color: "green", createdAt: 3,
+        segs: Array.from({ length: 200 }, (_, i) => ({ t: "x" + i, pre: "", post: "" })),
+      },
+    });
+    await tick(20);
+    const many = (be.store.clipkeep_highlights || []).find((x) => x.url === "http://a/z") || {};
+    ok("超过段数上限的 segs 整份作废", !Array.isArray(many.segs) || many.segs.length === 0,
+      JSON.stringify((many.segs || []).length));
+  }
+
+  /* 7. 身份键仍然只看内容：带 segs 的高亮重复导入不能翻倍 */
+  {
+    const url = "http://localhost/anchor7";
+    const be = makeBackend();
+    const rec = { url, title: "T", text: "量子比特可以叠加", color: "green", note: "", createdAt: 7,
+      segs: [{ t: "量子比特", pre: "", post: "" }, { t: "可以叠加", pre: "", post: "" }] };
+    const p = await mountPopup();
+    await p.putBackup({ app: "ClipKeep", version: 1, items: [], highlights: [rec, { ...rec }] });
+    await tick(30);
+    await p.click(p.$("modal-ok"));
+    await tick(60);
+    eq("同一份备份里的同一条只入库一次", (p.store.clipkeep_highlights || []).length, 1);
+    eq("入库的 segs 保留了两段", (((p.store.clipkeep_highlights || [])[0] || {}).segs || []).length, 2);
+  }
+
+  /* 8. 删除跨节点高亮：两段一起消失，存储里也真的删掉了 */
+  {
+    const url = "http://localhost/anchor8";
+    const html = `<p>简介：<strong>量子比特</strong>可以叠加</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.previousSibling, 3, strong.nextSibling, 4));
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    eq("重放出两段", c2.marks().length, 2);
+    c2.w.prompt = () => "!d";
+    c2.marks()[0].dispatchEvent(new c2.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    eq("两段一起从页面消失", c2.marks().length, 0);
+    eq("存储里这条真的没了", (c2.store.clipkeep_highlights || []).length, 0);
+    ok("原文完整", c2.bodyText() === "简介：量子比特可以叠加", c2.bodyText());
+  }
+
+  /* 9. 回收站跟着走：删掉的跨节点高亮能整条捞回，重放仍然分两段 */
+  {
+    const url = "http://localhost/anchor9";
+    const html = `<p>简介：<strong>量子比特</strong>可以叠加</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.previousSibling, 3, strong.nextSibling, 4));
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    c2.w.prompt = () => "!d";
+    c2.marks()[0].dispatchEvent(new c2.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    const entry = (c2.store.clipkeep_trash || []).find((e) => e.kind === "hl");
+    ok("回收站里这条带着分段锚点", !!entry && ((entry.item || {}).segs || []).length === 2,
+      JSON.stringify(c2.store.clipkeep_trash || []).slice(0, 200));
+    const restored = await c2.be.send({ type: "clipkeep:trash-restore", tid: entry.tid });
+    await tick(30);
+    eq("撤销成功", restored.ok, true);
+    const c3 = mountContent(url, c2.store.clipkeep_highlights, html);
+    await tick(30);
+    eq("恢复后仍然重放出两段", c3.marks().length, 2);
+  }
+
+  /* 10. 首段没有上下文、又在页面别处撞见同样的字：拼不出原文就整条不落地 */
+  {
+    const url = "http://localhost/anchor10";
+    // 记录说的是「两个相邻节点」，可这页面上只有隔着一段话的两处，凑不成连续原文
+    const html = `<p>量子</p><p>中间隔着一段无关的话</p><p>量子比特</p>`;
+    const rec = H(url, "split1", "量子比特", {
+      segs: [{ t: "量子", pre: "", post: "" }, { t: "比特", pre: "", post: "" }],
+    });
+    const c = mountContent(url, [rec], html);
+    await tick(30);
+    eq("跨度拼不出原文时一个都不标", c.marks().length, 0);
+    ok("原文完整", c.bodyText() === "量子中间隔着一段无关的话量子比特", c.bodyText());
+  }
+
+  /* 11. 首段在别处先撞见一次：换个落点重试，要标真正相邻的那一处 */
+  {
+    const url = "http://localhost/anchor11";
+    const html = `<p>量子</p><p>说明</p><p>量子<strong>比特</strong>的讨论</p>`;
+    const rec = H(url, "shift1", "量子比特", {
+      segs: [{ t: "量子", pre: "", post: "" }, { t: "比特", pre: "", post: "" }],
+    });
+    const c = mountContent(url, [rec], html);
+    await tick(30);
+    eq("两段都落地", c.marks().length, 2);
+    const ps = c.w.document.querySelectorAll("p");
+    const hosts = new Set(c.marks().map((m) => m.closest("p")));
+    ok("两段落在同一段（第三段）里", hosts.size === 1 && hosts.has(ps[2]),
+      [...hosts].map((p) => p && p.textContent).join("|"));
+    ok("开头那个孤立的「量子」没被牵连", ps[0].querySelector("mark") === null, ps[0].outerHTML);
+    ok("原文完整", c.bodyText() === "量子说明量子比特的讨论", c.bodyText());
+  }
+
+  /* 12. 元素之间的那个空格也是正文：不能把 "Hello world" 存成 "Helloworld" */
+  {
+    const url = "http://localhost/anchor12";
+    const html = `<p><span>Hello</span> <span>world</span> again</p>`;
+    const c = mountContent(url, [], html);
+    const spans = c.w.document.querySelectorAll("p span");
+    const rec = await mark(c, rangeIn(c, spans[0].firstChild, 0, spans[1].firstChild, 5));
+    ok("跨 span 选区确实建了高亮", !!rec, "浮动条或写入链路没走通");
+    eq("正文里两个词之间的空格还在", rec && rec.text, "Hello world");
+    eq("中间的空格节点也算一段", (rec.segs || []).length, 3);
+    eq("分段拼接与正文自洽", (rec.segs || []).map((s) => s.t).join(""), rec.text);
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    ok("原文一个字都没丢", c2.bodyText() === "Hello world again", c2.bodyText());
+    ok("两个词都标上了", c2.marks().map((m) => m.textContent).join("") === "Hello world",
+      c2.marks().map((m) => m.textContent).join("|"));
+  }
+
+  /* 13. 跨段落选区：正文照实记录（含段落间那个换行），刷新后每段都要回来 */
+  {
+    const url = "http://localhost/anchor13";
+    const html = `<div>\n  <p>第一句</p>\n  <p>第二句</p>\n</div>`;
+    const c = mountContent(url, [], html);
+    const ps = c.w.document.querySelectorAll("p");
+    const rec = await mark(c, rangeIn(c, ps[0].firstChild, 0, ps[1].firstChild, 3));
+    eq("正文里保留段落之间原有的空白", rec && rec.text, "第一句\n  第二句");
+    eq("分段拼接与正文自洽", (rec.segs || []).map((s) => s.t).join(""), rec.text);
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    ok("两段文字都标上了", c2.marks().map((m) => m.textContent).join("") === "第一句\n  第二句",
+      c2.marks().map((m) => JSON.stringify(m.textContent)).join("|"));
+    ok("原文完整", c2.bodyText() === "\n  第一句\n  第二句\n", JSON.stringify(c2.bodyText()));
+  }
+
+  /* 14. 正文被 MAX_TEXT 砍短时，锚点要跟着砍齐，不能整份作废 */
+  {
+    const be = makeBackend();
+    const a = "甲".repeat(12000);
+    const b = "乙".repeat(12000);
+    const c = "丙".repeat(6000);
+    const r = await be.send({
+      type: "clipkeep:hl-add",
+      payload: {
+        url: "http://a/long", title: "T", text: a + b + c, color: "green", createdAt: 1,
+        segs: [{ t: a, pre: "", post: "" }, { t: b, pre: "", post: "" }, { t: c, pre: "", post: "" }],
+      },
+    });
+    const stored = (be.store.clipkeep_highlights || [])[0] || {};
+    eq("正文砍到上限", stored.text && stored.text.length, 20000);
+    ok("锚点没被整份作废", Array.isArray(stored.segs) && stored.segs.length > 0,
+      JSON.stringify(stored.segs && stored.segs.length));
+    eq("锚点拼接仍等于砍过的正文", (stored.segs || []).map((s) => s.t).join(""), stored.text);
+    eq("后台把截断这件事告诉前端", r.truncated, true);
+  }
+
+  /* 15. 截断了就不能只说「已高亮 ✓」：正文少了一截，提示得承认 */
+  {
+    const url = "http://localhost/anchor14";
+    const html = `<p><strong>${"甲".repeat(12000)}</strong>${"乙".repeat(12000)}</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    await mark(c, rangeIn(c, strong.firstChild, 0, strong.nextSibling, 12000));
+    const t = c.toastText();
+    ok("超长正文的提示带出截断", /截断/.test(t), t);
+  }
+}
+
 
 /* ---------------- 4. 清单一致性 ---------------- */
 
@@ -3958,7 +4284,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testManifests];
   for (const s of suites) {
     try {
       await s();

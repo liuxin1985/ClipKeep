@@ -461,21 +461,60 @@ function gradeItem(id, review) {
 
 /* ---------------- 高亮 / 批注（统一由后台串行写） ---------------- */
 
-/** 只认白名单字段；缺 id 或 id 非法时重新生成 */
+/** 锚点上下文长度与分段数上限：再多就不是「定位」而是把整页存下来了 */
+const SEG_CTX = 24;
+const SEG_MAX = 64;
+
+/**
+ * 分段锚点清洗。每段 { t, pre, post } 全为字符串，且各段拼接必须正好等于正文——
+ * 对不上就整份作废（退回单段整词查找），因为拿一份和正文不符的 segs 去标别的字，
+ * 比标不回来坏得多：用户看到高亮落在错的地方，还会以为是自己记错了。
+ * 正文被 MAX_TEXT 砍短时按同一把尺子砍段：末段裁到上限、多余的段丢掉，
+ * 不然「砍过的正文」和「没砍的 segs」永远对不上，锚点会被自己制造的截断作废。
+ */
+function cleanSegs(segs, text) {
+  if (!Array.isArray(segs) || !segs.length || segs.length > SEG_MAX) return null;
+  const out = [];
+  let used = 0;
+  for (const s of segs) {
+    if (!s || typeof s !== "object") continue;
+    const raw = String(s.t === undefined || s.t === null ? "" : s.t);
+    if (!raw) continue;
+    const room = text.length - used;
+    if (room <= 0) break; // 正文已经拼满，后面多出来的段是备份里没截干净的尾巴
+    const t = raw.length > room ? raw.slice(0, room) : raw;
+    out.push({
+      t,
+      pre: String(s.pre === undefined || s.pre === null ? "" : s.pre).slice(-SEG_CTX),
+      post: String(s.post === undefined || s.post === null ? "" : s.post).slice(0, SEG_CTX),
+    });
+    used += t.length;
+  }
+  // 拼不回正文（哪怕只是长度对上）就整份作废：拿一份指鹿为马的 segs 去标字，
+  // 比标不回来坏得多
+  if (!out.length || out.map((x) => x.t).join("") !== text) return null;
+  return out;
+}
+
 function cleanHighlight(payload) {
   const p = payload || {};
   const text = String(p.text || "").trim();
   const url = String(p.url || "");
   if (!text || !url) return null;
   const rawId = String(p.id === undefined || p.id === null ? "" : p.id);
+  const safeText = text.slice(0, MAX_TEXT);
+  const segs = cleanSegs(p.segs, safeText);
   return {
     id: SAFE_ID.test(rawId) ? rawId : makeId(),
     url,
     title: String(p.title || ""),
-    text: text.slice(0, MAX_TEXT),
+    text: safeText,
     note: String(p.note || "").trim().slice(0, MAX_TEXT),
     color: HL_COLORS.indexOf(p.color) >= 0 ? p.color : "yellow",
     createdAt: Number(p.createdAt) || Date.now(),
+    // 砍过就要留痕：前端据此把「已高亮 ✓」改成承认少存了一截，不能让用户以为整段都存下了
+    ...(text.length > safeText.length ? { truncated: true } : {}),
+    ...(segs ? { segs } : {}),
   };
 }
 
@@ -489,14 +528,16 @@ const hlKeyOf = (h) => `${h.url}|${h.text}|${h.createdAt}`;
 function addHighlight(payload) {
   const hl = cleanHighlight(payload);
   if (!hl) return Promise.resolve({ ok: false, error: "invalid" });
+  // 上限值一并回给前端：那句「正文太长」要说得出到底多长，前端不该自己抄一份常数
+  const tell = (rec) => (rec && rec.truncated ? { truncated: true, limit: MAX_TEXT } : {});
   return mutateHl((list) => {
     const hit = list.find((x) => x && (x.id === hl.id || hlKeyOf(x) === hlKeyOf(hl)));
     if (hit) {
       // 报已有那条的 id：前端拿这个 id 去撤销 / 改色才对得上
-      return { result: { ok: true, id: hit.id, dup: true, count: list.length } };
+      return { result: { ok: true, id: hit.id, dup: true, count: list.length, ...tell(hit) } };
     }
     list.push(hl);
-    return { write: true, list, result: { ok: true, id: hl.id, count: list.length } };
+    return { write: true, list, result: { ok: true, id: hl.id, count: list.length, ...tell(hl) } };
   });
 }
 

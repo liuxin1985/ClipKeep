@@ -12,6 +12,11 @@
   const HL_KEY = "clipkeep_highlights";
   const COLORS = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
   const COLOR_NAMES = { yellow: "黄色", green: "绿色", pink: "粉色", blue: "蓝色" };
+  // 分段锚点的上下文长度与段数上限，与后台 cleanSegs 同口径（后台是信任边界，这里是产出方）
+  const SEG_CTX = 24;
+  const SEG_MAX = 64;
+  // 首段落点重试上限：够覆盖「同一句话在页面上重复几遍」，又不至于让长页面反复全量扫描
+  const ANCHOR_RETRY = 8;
 
   let toolbar = null;
   let hlColor = "yellow"; // 工具条上当前选中的高亮色（页面级，刷新回到默认黄）
@@ -338,8 +343,66 @@
     return mark;
   }
 
+  /**
+   * 把选区按文本节点拆成分段锚点：每段记住自己的正文与前后各 24 字上下文。
+   * 必须在包 mark 之前调用——包完节点边界就被我们改掉了。
+   * 返回 null 表示这份锚点不值得存（太碎，或一个有效段都没有），交回整段查找兜底。
+   */
+  function captureSegs(range) {
+    const parts = textNodesInRange(range).map(({ node, a, b }) => ({ node, a, b }));
+    // 只掐头去尾地丢掉纯空白节点：中间那个空白是「Hello␠world」的词间空格、
+    // 是段落之间的换行，它是用户选中的正文的一部分，吞掉就等于把正文改了
+    const blank = (p) => !p.node.nodeValue.slice(p.a, p.b).trim();
+    let lo = 0;
+    let hi = parts.length - 1;
+    while (lo <= hi && blank(parts[lo])) lo++;
+    while (hi >= lo && blank(parts[hi])) hi--;
+    const kept = parts.slice(lo, hi + 1);
+    if (!kept.length || kept.length > SEG_MAX) return null;
+    // 首尾按 trim 的口径收齐，正文与分段拼接才能一字不差
+    const first = kept[0];
+    const lead = first.node.nodeValue.slice(first.a, first.b).match(/^\s*/)[0].length;
+    first.a += lead;
+    const last = kept[kept.length - 1];
+    const tail = last.node.nodeValue.slice(last.a, last.b).match(/\s*$/)[0].length;
+    last.b -= tail;
+    return kept.map(({ node, a, b }) => {
+      const raw = node.nodeValue;
+      return {
+        t: raw.slice(a, b),
+        pre: raw.slice(Math.max(0, a - SEG_CTX), a),
+        post: raw.slice(b, b + SEG_CTX),
+      };
+    });
+  }
+
+  /** 选区覆盖到的文本节点，按文档顺序给出，并把起止偏移夹进各节点自身范围 */
+  function textNodesInRange(range) {
+    const out = [];
+    if (!range) return out;
+    const root = document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (range.intersectsNode && !range.intersectsNode(n)) continue;
+      const len = n.nodeValue.length;
+      let a = n === range.startContainer ? Math.min(range.startOffset, len) : 0;
+      let b = n === range.endContainer ? Math.min(range.endOffset, len) : len;
+      a = Math.max(0, a);
+      b = Math.max(a, b);
+      if (b > a) out.push({ node: n, a, b });
+    }
+    return out;
+  }
+
   async function createHighlight(sel, colorKey, note) {
     if (!sel || !sel.range) {
+      toast("请先选中文字");
+      return;
+    }
+    const segs = captureSegs(sel.range);
+    const text = segs ? segs.map((s) => s.t).join("") : sel.text;
+    if (!text) {
       toast("请先选中文字");
       return;
     }
@@ -357,18 +420,23 @@
       id,
       url: location.href,
       title: document.title || "",
-      text: sel.text,
+      text,
       color: colorKey,
       note: note || "",
       createdAt: Date.now(),
+      ...(segs ? { segs } : {}),
     };
     const wr = await hlWrite({ type: "clipkeep:hl-add", payload: rec });
     if (!wr || wr === "gone") { unwrapMark(mark); return; }
     window.getSelection().removeAllRanges();
-    // 重放是拿整段文字在单个文本节点里找：跨了 <strong> / <a> / 段落的选区刷新后找不回来。
-    // 真正的跨节点锚定要到下个版本，这里至少别承诺「刷新后还在」
+    // 有了分段锚点，跨元素的选区也找得回来；只有锚点太碎、退回整段查找时才需要那句保留话术
     const word = note ? "已批注" : "已高亮";
-    toast(replayable(sel.range) ? word + " ✓" : word + "（跨元素，刷新后可能不显示）");
+    // 后台砍过正文就不能只报 ✓：少存的那一截刷新后不会再出现，得当场说清楚
+    if (wr && wr.truncated) {
+      toast(`${word}（正文超过 ${wr.limit} 字，已截断）`);
+    } else {
+      toast(segs || replayable(sel.range) ? word + " ✓" : word + "（跨元素，刷新后可能不显示）");
+    }
   }
 
   /** 这条选区刷新后还重放得回来吗：起点终点在同一个文本节点里才行 */
@@ -445,7 +513,8 @@
    */
   function wrapSegment(node, a, b, spans) {
     node.splitText(b); // node 的后半（原 b 之后）成为下一个兄弟节点
-    const mid = node.splitText(a); // node 只剩 [0,a)，mid 正是这一段
+    // a 为 0 时不能再 splitText(0)：那会在 mark 前面留下一个空文本节点
+    const mid = a > 0 ? node.splitText(a) : node; // mid 正是 [a,b) 这一段
     // 先记住落点：mid 一旦被 appendChild 装进 mark 就离开文档，那时再取 parentNode 已是空的
     const parent = mid.parentNode;
     const next = mid.nextSibling;
@@ -459,6 +528,93 @@
     parent.insertBefore(child, next);
   }
 
+  /**
+   * 本页可参与标记的文本节点，按文档顺序快照一份（切分前先定好落点，偏移才不会互相打架）。
+   * 纯空白节点要留着：跨元素选区里那段空白也是正文（词间空格、段落换行），
+   * 把它从节点表里剔掉，对应的那一段就再也找不回来了。
+   */
+  function collectTextNodes() {
+    const out = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (!n.nodeValue) return NodeFilter.FILTER_REJECT;
+        if (n.parentElement && (n.parentElement.closest("script,style,." + NS + "-hl,." + NS + "-reader")))
+          return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let n;
+    while ((n = walker.nextNode())) out.push(n);
+    return out;
+  }
+
+  /** 从 (from, at) 起找这一段：整段文字命中且前后上下文对得上才算找到 */
+  function findSeg(nodes, from, at, seg) {
+    const t = String((seg && seg.t) || "");
+    if (!t) return null;
+    const pre = String((seg && seg.pre) || "");
+    const post = String((seg && seg.post) || "");
+    for (let i = from; i < nodes.length; i++) {
+      const val = nodes[i].nodeValue;
+      let idx = i === from ? Math.max(0, at) : 0;
+      while (idx <= val.length) {
+        const found = val.indexOf(t, idx);
+        if (found < 0) break;
+        const preOk = !pre || val.slice(Math.max(0, found - pre.length), found) === pre;
+        const postOk = !post || val.slice(found + t.length, found + t.length + post.length) === post;
+        if (preOk && postOk) return { i, start: found };
+        idx = found + 1;
+      }
+    }
+    return null;
+  }
+
+  /** 首尾命中之间「实际跨越的正文」——用来验证这几段是不是真的挨在一起 */
+  function spannedText(nodes, hits) {
+    const first = hits[0];
+    const last = hits[hits.length - 1];
+    if (first.node === last.node) return first.node.nodeValue.slice(first.start, last.end);
+    let s = first.node.nodeValue.slice(first.start);
+    for (let i = first.i + 1; i < last.i; i++) s += nodes[i].nodeValue;
+    return s + last.node.nodeValue.slice(0, last.end);
+  }
+
+  /**
+   * 一条高亮 → 一串「哪个节点的哪一段」。任何一段找不到就整条放弃：
+   * 只标一半的话，用户看到的是「我标过的字少了一截」，比干脆没标更难解释。
+   * 后一段必须落在更靠后的节点里；落完还要把跨过的正文拼回来看一眼，
+   * 跟原文对不上说明这几段被拼到了页面各处（短段没有上下文时最容易这样），
+   * 那就换个落点重试——宁可不标，也不能把一条高亮劈成满页。
+   * 重试封顶是护着长页面：不封顶时，一个高频短段能把整页文本反复扫上百遍。
+   */
+  function resolveHighlight(hl, nodes) {
+    const segs = Array.isArray(hl.segs) && hl.segs.length
+      ? hl.segs
+      : [{ t: String(hl.text || ""), pre: "", post: "" }];
+    const flat = (x) => String(x || "").replace(/\s+/g, "");
+    const want = flat(hl.text);
+    let cur = { i: 0, at: 0 };
+    for (let attempt = 0; attempt < ANCHOR_RETRY; attempt++) {
+      const head = findSeg(nodes, cur.i, cur.at, segs[0]);
+      if (!head) return null;
+      const hits = [{ node: nodes[head.i], i: head.i, start: head.start, end: head.start + String(segs[0].t).length }];
+      let cursor = { i: head.i + 1, at: 0 };
+      let okAll = true;
+      for (let k = 1; k < segs.length; k++) {
+        const at = findSeg(nodes, cursor.i, cursor.at, segs[k]);
+        if (!at) {
+          okAll = false;
+          break;
+        }
+        hits.push({ node: nodes[at.i], i: at.i, start: at.start, end: at.start + String(segs[k].t).length });
+        cursor = { i: at.i + 1, at: 0 };
+      }
+      if (okAll && flat(spannedText(nodes, hits)) === want) return hits;
+      cur = { i: head.i, at: head.start + 1 }; // 首段换下一处出现再试
+    }
+    return null;
+  }
+
   async function applyHighlights() {
     if (contextLost) return;
     const list = await getHighlights();
@@ -469,31 +625,25 @@
     // 改过的批注和颜色也能同步。normalize() 让上一次包裹切碎的文本节点重新合并
     if (unwrapAllMarks()) document.body.normalize();
     if (!mine.length) return;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-      acceptNode(n) {
-        if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-        if (n.parentElement && (n.parentElement.closest("script,style,." + NS + "-hl,." + NS + "-reader")))
-          return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    const remaining = mine.slice();
-    let node;
-    while ((node = walker.nextNode()) && remaining.length) {
-      const spans = [];
-      for (let i = 0; i < remaining.length; i++) {
-        const idx = node.nodeValue.indexOf(remaining[i].text);
-        if (idx >= 0) spans.push({ start: idx, end: idx + remaining[i].text.length, hl: remaining[i] });
+    const nodes = collectTextNodes();
+    // 按节点归堆：同一个节点上可能压着好几条高亮的不同片段
+    const byNode = new Map();
+    for (const hl of mine) {
+      for (const hit of resolveHighlight(hl, nodes) || []) {
+        if (!byNode.has(hit.node)) byNode.set(hit.node, []);
+        byNode.get(hit.node).push({ start: hit.start, end: hit.end, hl });
       }
-      if (!spans.length) continue;
+    }
+    for (const [node, spans] of byNode) {
+      if (!node.parentNode) continue;
       const full = node.nodeValue.length;
       // 按所有区间边界把这段文本切开，重叠处各占一段、交集那段两层套在一起。
       // 旧写法是从后往前整段包裹，一旦区间重叠，先落地那条会缩短 nodeValue，
       // 后一条的边界判定必然失败而被静默丢掉——重叠的高亮从此不再显示。
       const cuts = new Set([0, full]);
       spans.forEach((s) => {
-        cuts.add(Math.max(0, s.start));
-        cuts.add(Math.min(full, s.end));
+        cuts.add(Math.max(0, Math.min(s.start, full)));
+        cuts.add(Math.max(0, Math.min(s.end, full)));
       });
       const pts = [...cuts].sort((a, b) => a - b);
       const segs = [];
@@ -512,10 +662,6 @@
         } catch (_) {
           continue;
         }
-        seg.cover.forEach((s) => {
-          const at = remaining.indexOf(s.hl);
-          if (at >= 0) remaining.splice(at, 1);
-        });
       }
     }
   }
