@@ -4210,6 +4210,35 @@ async function testV110Anchor() {
     const t = c.toastText();
     ok("超长正文的提示带出截断", /截断/.test(t), t);
   }
+
+  /* 16. 隐藏文字不许混进正文：真浏览器划选的可见文本没有它，DOM 走查却摸得到
+         （jsdom 的 toString 会把 display:none 一起念，两边一致，复现不了这个分叉——
+           所以这里把 Selection.toString 改成浏览器真正的口径来喂这条差异） */
+  {
+    const url = "http://localhost/anchor16";
+    const html = `<p id="h16a">前面<strong style="display:none">隐藏文字</strong>后面还有一句话</p>`;
+    const c = mountContent(url, [], html);
+    const p = c.w.document.getElementById("h16a");
+    const before = p.firstChild;
+    const after = p.lastChild;
+    const realSel = c.w.getSelection.bind(c.w);
+    const visible = "前面后面还有一句话";
+    c.w.getSelection = () => {
+      const s = realSel();
+      return {
+        toString: () => visible,
+        rangeCount: s.rangeCount,
+        getRangeAt: (i) => s.getRangeAt(i),
+        removeAllRanges: () => s.removeAllRanges(),
+        addRange: (r) => s.addRange(r),
+      };
+    };
+    const rec = await mark(c, rangeIn(c, before, 0, after, after.data.length));
+    ok("跨隐藏节点的选区确实建了高亮", !!rec, "浮动条或写入链路没走通");
+    eq("正文只有用户看得见的字", rec && rec.text, visible);
+    ok("字符对不上就不存锚点（宁缺毋假）", rec && rec.segs === undefined, JSON.stringify((rec || {}).segs));
+    ok("丢掉锚点后提示退回老实话术", /跨元素|可能不显示/.test(c.toastText()), c.toastText());
+  }
 }
 
 

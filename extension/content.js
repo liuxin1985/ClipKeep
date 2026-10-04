@@ -343,6 +343,9 @@
     return mark;
   }
 
+  /** 比对字符用的「去空白」：浏览器和 DOM 走查对空白的口径本来就不一致，抹掉空白才比得出真的字符差异 */
+  const flatText = (x) => String(x == null ? "" : x).replace(/\s+/g, "");
+
   /**
    * 把选区按文本节点拆成分段锚点：每段记住自己的正文与前后各 24 字上下文。
    * 必须在包 mark 之前调用——包完节点边界就被我们改掉了。
@@ -400,7 +403,12 @@
       toast("请先选中文字");
       return;
     }
-    const segs = captureSegs(sel.range);
+    let segs = captureSegs(sel.range);
+    // DOM 走查能摸到 display:none 的字，浏览器划选的可见正文里没有它们（真浏览器审计抓到的一例）。
+    // 比对时先把空白抹平——浏览器和我们数空格的方式本来就不完全一致，那不该作废锚点；
+    // 抹平后还对不上，就只可能是「多字 / 少字」，整份丢掉退回 v1.9 的可见正文：
+    // 存一排用户没见过、也没打算存的字，比丢掉重放能力糟得多。
+    if (segs && flatText(segs.map((s) => s.t).join("")) !== flatText(sel.text)) segs = null;
     const text = segs ? segs.map((s) => s.t).join("") : sel.text;
     if (!text) {
       toast("请先选中文字");
@@ -591,8 +599,7 @@
     const segs = Array.isArray(hl.segs) && hl.segs.length
       ? hl.segs
       : [{ t: String(hl.text || ""), pre: "", post: "" }];
-    const flat = (x) => String(x || "").replace(/\s+/g, "");
-    const want = flat(hl.text);
+    const want = flatText(hl.text);
     let cur = { i: 0, at: 0 };
     for (let attempt = 0; attempt < ANCHOR_RETRY; attempt++) {
       const head = findSeg(nodes, cur.i, cur.at, segs[0]);
@@ -609,7 +616,7 @@
         hits.push({ node: nodes[at.i], i: at.i, start: at.start, end: at.start + String(segs[k].t).length });
         cursor = { i: at.i + 1, at: 0 };
       }
-      if (okAll && flat(spannedText(nodes, hits)) === want) return hits;
+      if (okAll && flatText(spannedText(nodes, hits)) === want) return hits;
       cur = { i: head.i, at: head.start + 1 }; // 首段换下一处出现再试
     }
     return null;
