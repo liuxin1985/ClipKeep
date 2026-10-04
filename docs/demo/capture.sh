@@ -30,10 +30,11 @@ snap() { # snap 名称 URL 宽 高
   echo "$name: $(ls -la "$OUT/$name.png" 2>/dev/null | awk '{print $5}') bytes"
 }
 
-# 文章页（划选工具条 / 收藏卡片 / 高亮落地 / 重叠高亮分层）
+# 文章页（划选工具条 / 收藏卡片 / 高亮落地 / 重叠高亮分层 / 跨节点锚点重放）
 snap "w_sel"  "file://$HERE/web_shot.html?m=sel"  900 560
 snap "w_card" "file://$HERE/web_shot.html?m=card" 900 560
 snap "w_ov"   "file://$HERE/web_shot.html?m=ov"   900 560
+snap "w_anchor" "file://$HERE/web_shot.html?m=anchor" 900 620
 # 弹窗三个视图 + 批量选择 + 键盘打分 + 类型筛选 + 键盘焦点 + 快捷键帮助 + 回收站明细 + 深色模式（380x600 就是真 popup 尺寸）
 for f in clips batch2 batchall review reveal marks filter focus keys trash dark; do
   snap "p_$f" "file://$HERE/shot.html?f=$f" 380 600

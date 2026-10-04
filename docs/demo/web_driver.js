@@ -23,6 +23,40 @@ addEventListener("load", () => setTimeout(async () => {
     document.title = "READY";
     return;
   }
+  if (mode === "anchor") {
+    // 真跨元素划选：选中「码用多个物理比特拼一个」，中间那个词被 <strong> 切走了，
+    // 单节点整词查找一定找不回来——这就是 v1.10 分段锚点要解决的那件事。
+    const strong = q("#p3 strong");
+    const before = strong.previousSibling;
+    const after = strong.nextSibling;
+    const r = document.createRange();
+    r.setStart(before, before.data.length - 4); // 「纠错码用多个」的后 4 字
+    r.setEnd(after, 3); // 「拼一个」
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await wait(200);
+    click('.clipkeep-swatch[data-color="green"]');
+    click(".clipkeep-btn-hl");
+    await until(() => window.__ckStore.clipkeep_highlights.length === 1);
+    const rec = window.__ckStore.clipkeep_highlights[0] || {};
+    const got = (rec.segs || []).length;
+    getSelection().removeAllRanges();
+    // 再重放一遍：把存储原样 set 回去，桩会广播 onChanged，content.js 会先还原再按锚点重标，
+    // 走的正是刷新后那条路（unwrapAllMarks + resolveHighlight + wrapSegment）
+    const marks0 = document.querySelectorAll(".clipkeep-hl").length;
+    chrome.storage.local.set({ clipkeep_highlights: [rec] });
+    await wait(400);
+    const marks1 = document.querySelectorAll(".clipkeep-hl").length;
+    const text1 = [...document.querySelectorAll(".clipkeep-hl")].map((m) => m.textContent).join("");
+    q("#log").style.display = "block";
+    q("#log").textContent =
+      `选区跨了 <strong> 边界 → 锚点 ${got} 段 · 正文「${rec.text}」\n` +
+      `重放前 ${marks0} 个标记 → 重放后 ${marks1} 个：${text1 === rec.text ? "一字不差 ✓" : "对不上 ✗"}`;
+    document.title = "READY";
+    return;
+  }
   window.__ckSelect("p1", 0, 58);
   await wait(160); // 工具条是 10ms 防抖后定位显示的
   if (mode === "hl") {

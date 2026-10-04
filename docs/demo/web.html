@@ -13,13 +13,21 @@
 <h2>量子计算入门</h2>
 <p id="p1">量子比特可以同时处于两种状态的叠加态，这意味着 n 个量子比特能够同时表示 2 的 n 次方个状态。在算法层面，量子并行让我们有机会一次评估指数级多的输入分支，再通过干涉把错误答案相消、把正确答案放大。</p>
 <p id="p2">Grover 搜索给出平方级加速，Shor 分解则在多项式时间内完成大整数分解，这也是后量子密码要提前换轨的原因。</p>
-<p id="p3">退相干时间决定了能做多少层门，纠错码用多个物理比特拼一个逻辑比特，代价是门保真度必须高于阈值。</p>
+<p id="p3">退相干时间决定了能做多少层门，纠错码用多个<strong>物理比特</strong>拼一个<em>逻辑比特</em>，代价是门保真度必须高于阈值。</p>
 <div id="log">—</div>
 
 <script>
 /* 浏览器里跑 content.js 用的最小 chrome 桩 */
 (() => {
   const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_trash: [], clipkeep_activity: {}, clipkeep_prefs: {} };
+  // ?seed=<encodeURIComponent(JSON)> 可以预置高亮：桩里的存储活不过一次加载，
+  // 想把上一次划选出来的记录带到「刷新后」那一次启动来看重放，只能从 URL 带。
+  // url 一律改成本页地址：content.js 按整页 URL（含 query）挑高亮，照抄种子自带的地址就永远匹配不上。
+  try {
+    const seed = new URLSearchParams(location.search).get("seed");
+    if (seed) store.clipkeep_highlights = JSON.parse(decodeURIComponent(seed))
+      .map((h) => ({ ...h, url: location.href }));
+  } catch (_) { /* 种子坏了就当没带，别拖垮整张截图页 */ }
   const clone = (v) => JSON.parse(JSON.stringify(v));
   const listeners = [];
   const storageListeners = [];
