@@ -347,8 +347,80 @@
   const flatText = (x) => String(x == null ? "" : x).replace(/\s+/g, "");
 
   /**
+   * 文档级扁平文本 + 偏移索引。
+   * 锚点的上下文要能越过文本节点边界借字（选区正好盖住一整个节点时，节点内一个字都不剩），
+   * 重放时也必须按同一口径找，所以两边共用这一份「整页文字 + 每个节点的起点」。
+   */
+  function flatIndex(nodes) {
+    const starts = [];
+    const at = new Map();
+    let text = "";
+    for (const node of nodes) {
+      starts.push(text.length);
+      at.set(node, text.length);
+      text += node.nodeValue;
+    }
+    return { text, nodes, starts, at };
+  }
+
+  /** 二分定位扁平偏移落在哪个节点（locate(flat, 0) 一定命中第一个节点） */
+  function locate(flat, pos) {
+    let lo = 0;
+    let hi = flat.nodes.length - 1;
+    let best = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (flat.starts[mid] <= pos) {
+        best = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return best;
+  }
+
+  /** 扁平区间 [from,to) → 每个文本节点上的那一段；跨过节点边界的区间切成几段就落几段 */
+  function flatRangeToHits(flat, from, to) {
+    const out = [];
+    let i = locate(flat, from);
+    let cursor = from;
+    while (i < flat.nodes.length && cursor < to) {
+      const start = flat.starts[i];
+      const end = start + flat.nodes[i].nodeValue.length;
+      const a = Math.max(cursor, start);
+      const b = Math.min(to, end);
+      if (b > a) out.push({ node: flat.nodes[i], start: a - start, end: b - start });
+      cursor = end;
+      i++;
+    }
+    return out;
+  }
+
+  /**
+   * 抓锚点时的整页文字：把已有高亮标记里的字也算上。
+   * 标记是我们包出来的，重放前会先拆掉并 normalize()，文字一字不少，
+   * 所以这里的扁平文本和重放时的那份是同一串——把它们当成两口径，
+   * 借来的上下文就会缺一大截。
+   */
+  function pageFlat() {
+    const nodes = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        if (!n.nodeValue) return NodeFilter.FILTER_REJECT;
+        if (n.parentElement && n.parentElement.closest("script,style,." + NS + "-reader"))
+          return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    return flatIndex(nodes);
+  }
+
+  /**
    * 把选区按文本节点拆成分段锚点：每段记住自己的正文与前后各 24 字上下文。
    * 必须在包 mark 之前调用——包完节点边界就被我们改掉了。
+   * 上下文取的是文档级扁平文本：整段盖住一个文本节点时节点内没有上下文可留，
+   * 只向邻居节点借字，才能把「这一处」和页面上别处的同名文本区分开。
    * 返回 null 表示这份锚点不值得存（太碎，或一个有效段都没有），交回整段查找兜底。
    */
   function captureSegs(range) {
@@ -369,12 +441,21 @@
     const last = kept[kept.length - 1];
     const tail = last.node.nodeValue.slice(last.a, last.b).match(/\s*$/)[0].length;
     last.b -= tail;
+    const flat = pageFlat();
     return kept.map(({ node, a, b }) => {
       const raw = node.nodeValue;
+      const t = raw.slice(a, b);
+      const base = flat.at.has(node) ? flat.at.get(node) : -1;
+      // 这个节点没在扁平文本里（选了 script/style 里的字，理论上不会发生）：退回节点内上下文
+      if (base < 0) {
+        return { t, pre: raw.slice(Math.max(0, a - SEG_CTX), a), post: raw.slice(b, b + SEG_CTX) };
+      }
+      const from = base + a;
+      const to = base + b;
       return {
-        t: raw.slice(a, b),
-        pre: raw.slice(Math.max(0, a - SEG_CTX), a),
-        post: raw.slice(b, b + SEG_CTX),
+        t,
+        pre: flat.text.slice(Math.max(0, from - SEG_CTX), from),
+        post: flat.text.slice(to, to + SEG_CTX),
       };
     });
   }
@@ -556,68 +637,57 @@
     return out;
   }
 
-  /** 从 (from, at) 起找这一段：整段文字命中且前后上下文对得上才算找到 */
-  function findSeg(nodes, from, at, seg) {
+  /** 从 from 起在整页文字里找这一段：整段文字命中且前后上下文对得上才算找到 */
+  function findSeg(flat, from, seg) {
     const t = String((seg && seg.t) || "");
-    if (!t) return null;
+    if (!t) return -1;
     const pre = String((seg && seg.pre) || "");
     const post = String((seg && seg.post) || "");
-    for (let i = from; i < nodes.length; i++) {
-      const val = nodes[i].nodeValue;
-      let idx = i === from ? Math.max(0, at) : 0;
-      while (idx <= val.length) {
-        const found = val.indexOf(t, idx);
-        if (found < 0) break;
-        const preOk = !pre || val.slice(Math.max(0, found - pre.length), found) === pre;
-        const postOk = !post || val.slice(found + t.length, found + t.length + post.length) === post;
-        if (preOk && postOk) return { i, start: found };
-        idx = found + 1;
-      }
+    let idx = Math.max(0, from);
+    while (idx <= flat.text.length) {
+      const found = flat.text.indexOf(t, idx);
+      if (found < 0) return -1;
+      const preOk = !pre || flat.text.slice(Math.max(0, found - pre.length), found) === pre;
+      const postOk = !post || flat.text.slice(found + t.length, found + t.length + post.length) === post;
+      if (preOk && postOk) return found;
+      idx = found + 1;
     }
-    return null;
-  }
-
-  /** 首尾命中之间「实际跨越的正文」——用来验证这几段是不是真的挨在一起 */
-  function spannedText(nodes, hits) {
-    const first = hits[0];
-    const last = hits[hits.length - 1];
-    if (first.node === last.node) return first.node.nodeValue.slice(first.start, last.end);
-    let s = first.node.nodeValue.slice(first.start);
-    for (let i = first.i + 1; i < last.i; i++) s += nodes[i].nodeValue;
-    return s + last.node.nodeValue.slice(0, last.end);
+    return -1;
   }
 
   /**
    * 一条高亮 → 一串「哪个节点的哪一段」。任何一段找不到就整条放弃：
    * 只标一半的话，用户看到的是「我标过的字少了一截」，比干脆没标更难解释。
-   * 后一段必须落在更靠后的节点里；落完还要把跨过的正文拼回来看一眼，
+   * 后一段必须落在更靠后的位置；落完还要把跨过的文字拼回来看一眼，
    * 跟原文对不上说明这几段被拼到了页面各处（短段没有上下文时最容易这样），
    * 那就换个落点重试——宁可不标，也不能把一条高亮劈成满页。
    * 重试封顶是护着长页面：不封顶时，一个高频短段能把整页文本反复扫上百遍。
    */
-  function resolveHighlight(hl, nodes) {
+  function resolveHighlight(hl, flat) {
     const segs = Array.isArray(hl.segs) && hl.segs.length
       ? hl.segs
       : [{ t: String(hl.text || ""), pre: "", post: "" }];
     const want = flatText(hl.text);
-    let cur = { i: 0, at: 0 };
+    let from = 0;
     for (let attempt = 0; attempt < ANCHOR_RETRY; attempt++) {
-      const head = findSeg(nodes, cur.i, cur.at, segs[0]);
-      if (!head) return null;
-      const hits = [{ node: nodes[head.i], i: head.i, start: head.start, end: head.start + String(segs[0].t).length }];
-      let cursor = { i: head.i + 1, at: 0 };
+      const head = findSeg(flat, from, segs[0]);
+      if (head < 0) return null;
+      let cursor = head + String(segs[0].t).length;
+      const ranges = [{ from: head, to: cursor }];
       let okAll = true;
       for (let k = 1; k < segs.length; k++) {
-        const at = findSeg(nodes, cursor.i, cursor.at, segs[k]);
-        if (!at) {
+        const at = findSeg(flat, cursor, segs[k]);
+        if (at < 0) {
           okAll = false;
           break;
         }
-        hits.push({ node: nodes[at.i], i: at.i, start: at.start, end: at.start + String(segs[k].t).length });
-        cursor = { i: at.i + 1, at: 0 };
+        ranges.push({ from: at, to: at + String(segs[k].t).length });
+        cursor = at + String(segs[k].t).length;
       }
-      if (okAll && flatText(spannedText(nodes, hits)) === want) return hits;
-      cur = { i: head.i, at: head.start + 1 }; // 首段换下一处出现再试
+      if (okAll && flatText(flat.text.slice(ranges[0].from, cursor)) === want) {
+        return ranges.reduce((acc, r) => acc.concat(flatRangeToHits(flat, r.from, r.to)), []);
+      }
+      from = head + 1; // 首段换下一处出现再试
     }
     return null;
   }
@@ -632,11 +702,12 @@
     // 改过的批注和颜色也能同步。normalize() 让上一次包裹切碎的文本节点重新合并
     if (unwrapAllMarks()) document.body.normalize();
     if (!mine.length) return;
-    const nodes = collectTextNodes();
+    // 定位全程在「整页文字」上做，落完所有段才开始改 DOM：先定好落点，偏移才不会互相打架
+    const flat = flatIndex(collectTextNodes());
     // 按节点归堆：同一个节点上可能压着好几条高亮的不同片段
     const byNode = new Map();
     for (const hl of mine) {
-      for (const hit of resolveHighlight(hl, nodes) || []) {
+      for (const hit of resolveHighlight(hl, flat) || []) {
         if (!byNode.has(hit.node)) byNode.set(hit.node, []);
         byNode.get(hit.node).push({ start: hit.start, end: hit.end, hl });
       }

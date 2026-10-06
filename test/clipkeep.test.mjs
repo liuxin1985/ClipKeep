@@ -3928,7 +3928,7 @@ async function testV110Anchor() {
     ok("锚定成功后不再需要「跨元素」保留话术", !!rec && !/跨元素|可能不显示/.test(t), t);
     eq("按文本节点拆成两段", (rec.segs || []).length, 2);
     eq("分段拼接与正文自洽", (rec.segs || []).map((s) => s.t).join(""), rec.text);
-    eq("第一段带上文", (rec.segs || [])[0] && rec.segs[0].pre, "所谓");
+    eq("第一段带上文", (rec.segs || [])[0] && rec.segs[0].pre, "简介：所谓");
     eq("第二段带下文", (rec.segs || [])[1] && rec.segs[1].post, "，这是并行性的来源。");
     // 重新挂载 = 刷新这一页
     const c2 = mountContent(url, [rec], html);
@@ -4113,18 +4113,37 @@ async function testV110Anchor() {
     eq("恢复后仍然重放出两段", c3.marks().length, 2);
   }
 
-  /* 10. 首段没有上下文、又在页面别处撞见同样的字：拼不出原文就整条不落地 */
+  /* 10. 首段没有上下文、又在页面别处撞见同样的字：换落点重试，落到真能拼回原文的那一处 */
   {
     const url = "http://localhost/anchor10";
-    // 记录说的是「两个相邻节点」，可这页面上只有隔着一段话的两处，凑不成连续原文
+    // 扁平文本定位之后，两段就算落在同一个文本节点里也算「挨在一起」——
+    // v1.10 要求它们分处两个节点，这种页面就只能干瞪眼不标
     const html = `<p>量子</p><p>中间隔着一段无关的话</p><p>量子比特</p>`;
+    const rec = H(url, "shift0", "量子比特", {
+      segs: [{ t: "量子", pre: "", post: "" }, { t: "比特", pre: "", post: "" }],
+    });
+    const c = mountContent(url, [rec], html);
+    await tick(30);
+    eq("两段都落地", c.marks().length, 2);
+    const ps = c.w.document.querySelectorAll("p");
+    ok("落在真正连续的那一处（第三段）", c.marks().every((m) => m.closest("p") === ps[2]),
+      c.marks().map((m) => (m.closest("p") || {}).textContent).join("|"));
+    ok("开头那个孤立的「量子」没被牵连", ps[0].querySelector("mark") === null, ps[0].outerHTML);
+    ok("两段属于同一条记录", new Set(c.marks().map((m) => m.dataset.hlid)).size === 1);
+    ok("原文完整", c.bodyText() === "量子中间隔着一段无关的话量子比特", c.bodyText());
+  }
+
+  /* 10b. 页面上根本拼不出连续原文：一个都不标，比标错地方好 */
+  {
+    const url = "http://localhost/anchor10b";
+    const html = `<p>量子</p><p>中间隔着一段无关的话</p><p>比特</p>`;
     const rec = H(url, "split1", "量子比特", {
       segs: [{ t: "量子", pre: "", post: "" }, { t: "比特", pre: "", post: "" }],
     });
     const c = mountContent(url, [rec], html);
     await tick(30);
     eq("跨度拼不出原文时一个都不标", c.marks().length, 0);
-    ok("原文完整", c.bodyText() === "量子中间隔着一段无关的话量子比特", c.bodyText());
+    ok("原文完整", c.bodyText() === "量子中间隔着一段无关的话比特", c.bodyText());
   }
 
   /* 11. 首段在别处先撞见一次：换个落点重试，要标真正相邻的那一处 */
@@ -4242,6 +4261,142 @@ async function testV110Anchor() {
 }
 
 
+/* ---------------- 3u. v1.11 文档级上下文锚定 ---------------- */
+
+async function testV111FlatAnchor() {
+  console.log("\n[3u] 文档级上下文：整段盖住文本节点时向节点外借字");
+  const now = Date.now();
+  const H = (url, id, text, extra) => ({
+    id, url, title: "页面", text, color: "green", note: "", createdAt: now, ...(extra || {}),
+  });
+  async function mark(c, range) {
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    const btn = c.w.document.querySelector(".clipkeep-btn-hl");
+    if (!btn) return null;
+    btn.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(60);
+    return (c.store.clipkeep_highlights || [])[0] || null;
+  }
+  const rangeIn = (c, startNode, so, endNode, eo) => {
+    const r = c.w.document.createRange();
+    r.setStart(startNode, so);
+    r.setEnd(endNode, eo);
+    return r;
+  };
+
+  /* 1. 选区正好盖住整个文本节点：段内没有上下文，得向邻居节点借字 */
+  {
+    const url = "http://localhost/flat1";
+    const html = `<p>第一章<strong>猫</strong>喜欢高处。</p><p>第二章<strong>猫</strong>喜欢鱼。</p>`;
+    const c = mountContent(url, [], html);
+    const strongs = c.w.document.querySelectorAll("p strong");
+    const rec = await mark(c, rangeIn(c, strongs[1].firstChild, 0, strongs[1].firstChild, 1));
+    ok("整节点选区确实建了高亮", !!rec, "浮动条或写入链路没走通");
+    eq("正文只有那一个字", rec && rec.text, "猫");
+    eq("上文按 24 字窗口借，跨过节点边界", (rec.segs || [])[0] && rec.segs[0].pre, "第一章猫喜欢高处。第二章");
+    eq("下文从下一个文本节点借来", (rec.segs || [])[0] && rec.segs[0].post, "喜欢鱼。");
+  }
+
+  /* 2. 两处一模一样的整节点短词：重放落在当初标记的那一处，不是页面上第一处 */
+  {
+    const url = "http://localhost/flat2";
+    const html = `<p>第一章<strong>猫</strong>喜欢高处。</p><p>第二章<strong>猫</strong>喜欢鱼。</p>`;
+    const c = mountContent(url, [], html);
+    const strongs = c.w.document.querySelectorAll("p strong");
+    const rec = await mark(c, rangeIn(c, strongs[1].firstChild, 0, strongs[1].firstChild, 1));
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    eq("重放回一个标记", c2.marks().length, 1);
+    const ps = c2.w.document.querySelectorAll("p");
+    const host = c2.marks()[0] && c2.marks()[0].closest("p");
+    ok("标记落在第二章", !!host && host === ps[1],
+      host ? host.textContent : "没有标记");
+    ok("第一章那只猫没被牵连", ps[0].querySelector("mark") === null, ps[0].outerHTML);
+    ok("原文完整", c2.bodyText() === "第一章猫喜欢高处。第二章猫喜欢鱼。", c2.bodyText());
+  }
+
+  /* 3. 借字同样受 24 字窗口约束：只借最近的 24 个字 */
+  {
+    const url = "http://localhost/flat3";
+    const html = `<p>${"前".repeat(40)}<strong>猫</strong>后</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.firstChild, 0, strong.firstChild, 1));
+    eq("上文只借 24 字", (rec.segs || [])[0] && (rec.segs[0].pre || "").length, 24);
+    eq("借来的都是紧邻的字", (rec.segs || [])[0] && rec.segs[0].pre, "前".repeat(24));
+    eq("下文照旧", (rec.segs || [])[0] && rec.segs[0].post, "后");
+  }
+
+  /* 4. 借来的上下文越过块级边界：段落末尾的段能从下一段借到下文 */
+  {
+    const url = "http://localhost/flat4";
+    const html = `<div><p>甲<strong>乙</strong></p><p>丙</p></div>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.firstChild, 0, strong.firstChild, 1));
+    eq("上文来自同段", (rec.segs || [])[0] && rec.segs[0].pre, "甲");
+    eq("下文跨到下一段", (rec.segs || [])[0] && rec.segs[0].post, "丙");
+    const c2 = mountContent(url, [rec], html);
+    await tick(30);
+    eq("重放后仍然一字不差地落在「乙」上", c2.marks().map((m) => m.textContent).join("|"), "乙");
+  }
+
+  /* 5. 页面改写后上下文对不上：宁可一个都不标，也不能退回到第一处同名文本 */
+  {
+    const url = "http://localhost/flat5";
+    const html = `<p>第一章<strong>猫</strong>喜欢高处。</p><p>第二章<strong>猫</strong>喜欢鱼。</p>`;
+    const c = mountContent(url, [], html);
+    const strongs = c.w.document.querySelectorAll("p strong");
+    const rec = await mark(c, rangeIn(c, strongs[1].firstChild, 0, strongs[1].firstChild, 1));
+    // 第二章那句话被作者改成了「喜欢鸟」：借来的下文不再匹配，落点无法确认
+    const c2 = mountContent(url, [rec], `<p>第一章<strong>猫</strong>喜欢高处。</p><p>第二章<strong>猫</strong>喜欢鸟。</p>`);
+    await tick(30);
+    eq("确认不了的落点就不标", c2.marks().length, 0);
+    ok("第一章那只猫没有被误标", !c2.w.document.querySelectorAll("p")[0].querySelector("mark"),
+      c2.w.document.querySelectorAll("p")[0].outerHTML);
+  }
+
+  /* 6. 没有借到字的旧记录（v1.10 存的空上下文）照旧走重试：不因为这次改造而更差 */
+  {
+    const url = "http://localhost/flat6";
+    const html = `<p>说明</p><p>猫<em>喜欢鱼</em></p>`;
+    const rec = H(url, "legacy6", "猫喜欢鱼", {
+      segs: [{ t: "猫", pre: "", post: "" }, { t: "喜欢鱼", pre: "", post: "" }],
+    });
+    const c = mountContent(url, [rec], html);
+    await tick(30);
+    eq("两段都落地", c.marks().length, 2);
+    ok("落在真正相邻的那一处", new Set(c.marks().map((m) => m.closest("p"))).size === 1,
+      c.marks().map((m) => (m.closest("p") || {}).textContent).join("|"));
+    ok("原文完整", c.bodyText() === "说明猫喜欢鱼", c.bodyText());
+  }
+
+  /* 7. 借字之后仍然只多一份锚点，正文与分段拼接保持自洽（后台白名单不会作废它） */
+  {
+    const url = "http://localhost/flat7";
+    const html = `<p>第一章<strong>猫</strong>喜欢高处。</p>`;
+    const c = mountContent(url, [], html);
+    const strong = c.w.document.querySelector("p strong");
+    const rec = await mark(c, rangeIn(c, strong.firstChild, 0, strong.firstChild, 1));
+    eq("只有一段", (rec.segs || []).length, 1);
+    eq("分段拼接与正文自洽", (rec.segs || []).map((s) => s.t).join(""), rec.text);
+    const be = makeBackend();
+    await be.send({
+      type: "clipkeep:hl-add",
+      payload: { url: "http://a/flat7", title: "T", text: rec.text, color: "green",
+        createdAt: 7, segs: rec.segs },
+    });
+    await tick(20);
+    const stored = (be.store.clipkeep_highlights || []).find((x) => x.url === "http://a/flat7") || {};
+    eq("后台收下借来的上下文", (stored.segs || [])[0] && stored.segs[0].pre, "第一章");
+  }
+}
+
+
 /* ---------------- 4. 清单一致性 ---------------- */
 
 async function testManifests() {
@@ -4313,7 +4468,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testManifests];
   for (const s of suites) {
     try {
       await s();
