@@ -20,6 +20,10 @@ W, H = 900, 620          # 画布
 BAR = 38                 # 浏览器标题栏高度
 PAD = 28                 # 画布留白
 FONT = "/System/Library/Fonts/Hiragino Sans GB.ttc"
+# 主字体只画到 ⑩：⑪ 之后的带圈序号会落成豆腐块（v1.9~v1.10 的动图里 ⑪⑫⑬⑭ 就是这么发出去的）。
+# 缺哪个字就单独换这套兜底字体补哪个，整句换过去中文反而难看。
+FONT_FALLBACK = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+_TOFU = "\ue000"  # 私用区：任何字体都画不出真字形，拿它当「缺字长什么样」的参照
 
 INK = (17, 24, 39)
 MUTED = (107, 114, 128)
@@ -34,6 +38,47 @@ def f(sz, bold=False):
         return ImageFont.truetype(FONT, sz, index=(1 if bold else 0))
     except Exception:
         return ImageFont.truetype(FONT, sz)
+
+
+def f_alt(sz, bold=False):
+    """兜底字体；机器上没有这个文件（比如 Linux）就返回 None，说明文字退回主字体画。"""
+    try:
+        return ImageFont.truetype(FONT_FALLBACK, sz)
+    except Exception:
+        return None
+
+
+def _sig(font, ch):
+    m = font.getmask(ch)
+    return (m.size, bytes(m))
+
+
+def _has(font, ch):
+    """这个字体画不画得出这个字：跟私用区的豆腐块一模一样就算画不出。"""
+    cache = getattr(font, "_cov", None)
+    if cache is None:
+        cache = font._cov = {}
+    if "_tofu" not in cache:
+        cache["_tofu"] = _sig(font, _TOFU)
+    if ch not in cache:
+        cache[ch] = _sig(font, ch)
+    return cache[ch] != cache["_tofu"]
+
+
+def draw_caption(d, xy, text, sz, fill):
+    """一行说明文字，逐字挑字体：主字体缺的字（⑪ 之后的序号）交给兜底字体。"""
+    main = f(sz, True)
+    alt = None
+    x, y = xy
+    for ch in text:
+        font = main
+        if not _has(main, ch):
+            if alt is None:
+                alt = f_alt(sz, True)
+            if alt is not None and _has(alt, ch):
+                font = alt
+        d.text((x, y), ch, font=font, fill=fill)
+        x += font.getlength(ch)
 
 
 def load(name):
@@ -62,7 +107,7 @@ def base(url, caption, step, total):
     d.rounded_rectangle([x1 - 50, y0 + 6, x1 - 28, y0 + 32], radius=7, fill=(229, 237, 255), outline=BLUE)
     d.text([x1 - 45, y0 + 8], "★", font=f(15), fill=BLUE)
     # 底部说明
-    d.text([x0 + 2, y1 + 14], caption, font=f(15, True), fill=INK)
+    draw_caption(d, (x0 + 2, y1 + 14), caption, 15, INK)
     d.text([x1 - 46, y1 + 16], "%d / %d" % (step, total), font=f(12), fill=MUTED)
     return im, d, (x0, y0 + BAR, x1, y1)
 
@@ -100,6 +145,7 @@ FRAMES = [
     ("p_reveal", "example.com/quantum-computing", "⑫ 空格翻答案，1 / 2 / 3 打分，整批删除也能一次撤销"),
     ("p_trash", "example.com/quantum-computing", "⑬ 回收站明细：撤销只管最近一批，想捞哪一条就点哪一条"),
     ("p_dark", "example.com/quantum-computing", "⑭ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
+    ("p_en", "example.com/quantum-computing", "⑮ 界面语言跟着偏好走：中文 / English 用的是同一份代码"),
 ]
 
 

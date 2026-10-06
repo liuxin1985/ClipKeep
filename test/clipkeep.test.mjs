@@ -4808,6 +4808,37 @@ async function testV111I18n() {
     const toasts = be.sentToTab.map((s) => s.msg.message).join("|");
     ok("失败提示也跟上补读后的语言", !!toasts && !CJK.test(toasts), toasts);
   }
+
+  /* 17. 模块级常量不许存译死的文案：`const X = T("…")` 会在读到偏好之前就把语言冻住，
+     翻译必须发生在「用的那一刻」。箭头函数形式的 `const f = (k) => T(k)` 是合法的，不算。 */
+  {
+    const FROZEN = /^  (?:const|let) [A-Za-z_$][\w$]* = (?!\(|function)[^=]*\bT\(/;
+    const findFrozen = (text) => text.split("\n")
+      .map((l, i) => `${i + 1}: ${l}`)
+      .filter((l) => FROZEN.test(l.replace(/^\d+: /, "")));
+
+    const fixture = [
+      "  const T = window.__x;",
+      "  const SETTINGS_TITLE = T(\"设置\");",
+      "  const NAMES = { a: I18N.T(\"红色\") };",
+      "  const kindLabel = (k) => T(KIND_LABELS[k] || k);",
+      "  function render() {",
+      "    const tip = T(\"勾选后可批量删除\");",
+      "  }",
+    ].join("\n");
+    const found = findFrozen(fixture);
+    ok("检得出模块级译死的文案（含 I18N.T 与对象字面量）",
+       found.length === 2 && /SETTINGS_TITLE/.test(found[0]) && /NAMES/.test(found[1]),
+       found.join(" | "));
+    ok("合法的按调用翻译（箭头函数、函数体内）不误报",
+       !found.some((f) => /kindLabel|tip =/.test(f)), found.join(" | "));
+
+    for (const f of ["popup.js", "content.js", "background.js"]) {
+      const bad = findFrozen(src(f));
+      ok(`${f} 没有模块级译死的文案`, bad.length === 0,
+         bad.join(" | ") + " → 换语言后这句永远是第一次算出来的那种");
+    }
+  }
 }
 
 
@@ -4866,6 +4897,36 @@ async function testManifests() {
   const bgTypes = new Set(typesIn(bg));
   for (const t of frontTypes) ok(`后台认识 ${t}`, bgTypes.has(t), "→ 消息会返回 unknown");
   for (const t of bgTypes) ok(`前端或页面用到 ${t}`, frontTypes.has(t), "→ 死代码 / 拼错的历史消息");
+
+  /* 演示抓帧管线：清单要装的脚本一个都不能漏，界面语言必须钉住 */
+  {
+    const demo = path.join(ROOT, "docs", "demo");
+    const shot = fs.readFileSync(path.join(demo, "make_shot.sh"), "utf8");
+    const copied = new Set(((shot.match(/^cp .*$/m) || [""])[0])
+      .split(/\s+/).map((p) => p.replace(/"/g, "").replace(/^.*\//, "")).filter((p) => /\.(js|css)$/.test(p)));
+    const loaded = new Set(mf.content_scripts[0].js);
+    for (const m of html.matchAll(/<script src="([^"]+)"><\/script>/g)) loaded.add(m[1]);
+    for (const f of loaded) ok(`抓帧脚本把 ${f} 一起拷过去`, copied.has(f),
+      "→ 截图页里没有这个文件，界面静默退回旧行为，动图看着还是对的");
+    // 无头 Chrome 的界面语言是 en-US：偏好留空 = auto = 英文，整片动图会换成英文而没人察觉
+    const stub = fs.readFileSync(path.join(demo, "stub.js"), "utf8");
+    const web = fs.readFileSync(path.join(demo, "web.html"), "utf8");
+    const zhPinned = (txt) => /clipkeep_prefs:\s*\{[^}]*\blang\b/.test(txt) && /"zh"/.test(txt);
+    ok("弹窗抓帧默认把界面语言钉成中文", zhPinned(stub), "prefs 里没有 lang 或缺 zh 默认值");
+    ok("网页抓帧默认把界面语言钉成中文", zhPinned(web), "prefs 里没有 lang 或缺 zh 默认值");
+    ok("弹窗抓帧能按 URL 换成英文", /get\("lang"\)/.test(stub), "只能出中文");
+    ok("网页抓帧能按 URL 换成英文", /get\("lang"\)/.test(web), "只能出中文");
+    const cap = fs.readFileSync(path.join(demo, "capture.sh"), "utf8");
+    ok("抓帧列表里有一帧英文界面", /lang=en/.test(cap), "→ 英文用户看不到自己那套界面");
+    const gif = fs.readFileSync(path.join(ROOT, "docs", "gen_demo_gif.py"), "utf8");
+    ok("动图合成把英文帧也排进去", /p_en/.test(gif), "→ 白抓一帧");
+    /* 说明文字里的带圈序号：主字体 Hiragino Sans GB 只画到 ⑩，⑪ 起是豆腐块——
+       已发布的 v1.9~v1.10 动图里 ⑪⑫⑬⑭ 四帧的序号就是四个方框，出图时没人放大看。 */
+    ok("动图说明有缺字兜底字体", /FONT_FALLBACK\s*=/.test(gif), "→ ⑪ 之后的序号画成方框");
+    ok("说明文字走带兜底的绘制函数",
+       /draw_caption\(/.test(gif) && !/d\.text\(\[x0 \+ 2, y1 \+ 14\], caption/.test(gif),
+       "→ 主字体缺字时直接画成豆腐块");
+  }
 
   /* 发布文档要指向当前版本 */
   const changelog = fs.readFileSync(path.join(ROOT, "CHANGELOG.md"), "utf8");

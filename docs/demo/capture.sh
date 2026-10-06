@@ -40,3 +40,6 @@ snap "w_anchor" "file://$HERE/web_shot.html?m=anchor" 900 620
 for f in clips batchall review reveal marks filter focus keys trash dark; do
   snap "p_$f" "file://$HERE/shot.html?f=$f" 380 600
 done
+# 英文界面那一帧：同一份 popup.html / popup.js，只是偏好把语言换成 en（?lang= 由桩接住）。
+# 留着它，README 上「界面语言跟着偏好走」这句话就有图可看，而不是只在代码里。
+snap "p_en" "file://$HERE/shot.html?f=clips&lang=en" 380 600

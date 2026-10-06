@@ -7,6 +7,15 @@
     "追加一段足够长的内容，让这条收藏明确超过 240 字的折叠阈值：测量本身不改变结果，" +
     "但把笔记只存进收藏夹而不复习，就等于没有存。所以 ClipKeep 把回顾排期、热力图打卡、" +
     "回收站撤销和 Markdown 导出串成一条链，任何一环掉链子都会被自动化测试当场抓住。";
+  // 界面语言必须钉住：无头 Chrome 的界面语言是 en-US，偏好留空等于 auto，
+  // 整套演示会静默换成英文，README 上那张动图就不再是给它看的那群人熟悉的界面。
+  // ?lang=en 单独抓一帧英文，证明文案层是真的，而不是只有中文一套能看。
+  const UI_LANG = (() => {
+    try {
+      const p = new URLSearchParams(location.search).get("lang");
+      return ["auto", "zh", "en"].indexOf(p) >= 0 ? p : "zh";
+    } catch (_) { return "zh"; }
+  })();
   const store = {
     clipkeep_items: [
       { id: "a1", text: LONG, url: "https://en.wikipedia.org/wiki/Quantum_computing_(history)", title: "量子计算入门：从比特到量子比特",
@@ -45,7 +54,7 @@
       o[k(4)] = { n: 2, ids: ["a2", "a3"] };
       o[k(30)] = 7; return o;
     })(),
-    clipkeep_prefs: {},
+    clipkeep_prefs: { lang: UI_LANG },
   };
   const clone = (v) => JSON.parse(JSON.stringify(v));
   chrome = {

@@ -145,7 +145,8 @@
       <div class="feat"><div class="ico">🔎</div><h3>打卡明细下钻</h3><p>点热力图里有数据的日子，当天复习了哪几条收藏直接列出来（已删掉的会如实标出），旧版本的记录只有条数也会说明。</p></div>
       <div class="feat"><div class="ico">🖼️</div><h3>图片与链接剪藏</h3><p>图片、链接上右键即可收藏，列表带类型徽标和可点原址，导出成 <code>![图](&lt;地址&gt;)</code>。弹窗不远程加载缩略图——拉图等于把你的浏览记录交给对方服务器。</p></div>
       <div class="feat"><div class="ico">🎨</div><h3>四种高亮颜色</h3><p>划词工具条上点色块即用该色高亮并记为当前色，重点 / 疑问 / 待办分色放；回到弹窗还能对任意一条一键换色。</p></div>
-            <div class="feat"><div class="ico">🧭</div><h3>跨元素分段锚定</h3><p>选段里夹着 <code>&lt;strong&gt;</code> 或链接？高亮按文本节点拆成多段锚点，每段带前后各 24 字上下文，重放时按段序定位再把正文拼回核对。<b>对不上就整条不标</b>，绝不把一条高亮劈成满页。</p></div>
+            <div class="feat"><div class="ico">🧭</div><h3>跨元素分段锚定</h3><p>选段里夹着 <code>&lt;strong&gt;</code> 或链接？高亮按文本节点拆成多段锚点，重放时按段序定位再把正文拼回核对。上下文按<b>整页文字</b>取 24 字窗口，正好盖住一整个节点时向邻居节点借字——页面里有两处同名文本，标的是你划过的那一处，不是第一处。<b>对不上就整条不标</b>，绝不把一条高亮劈成满页。</p></div>
+      <div class="feat"><div class="ico">🌐</div><h3>中文 / English 界面</h3><p>⚙ 里选「跟随浏览器 / 中文 / English」，弹窗、页面浮层、右键菜单、导出的 Markdown 一起换。文案层的键就是中文原文，缺一条译文只会退回中文而不会渲染成空白，缺的那条由覆盖率断言当场揪出（275 条已对齐）。浮层只改自己那块文字，<b>宿主页面的 <code>&lt;html lang&gt;</code> 不动</b>。</p></div>
 <div class="feat"><div class="ico">🧵</div><h3>重叠高亮分层</h3><p>两条高亮的区间部分相交时，按边界把文本切段：各占的各一段，交集那段套两层颜色。<b>旧写法会让后落地的那条被静默丢掉</b>，涂了却看不见——最坏的是你不知道它没了。</p></div>
       <div class="feat"><div class="ico">☑️</div><h3>列表批量操作</h3><p>勾选任意几条 → 批量加标签（合并去重）、批量导出、批量删除。「全选」跟的是<b>当前筛选结果</b>，整批删除共用一个撤销号，点一次「撤销」全部还原。</p></div>
       <div class="feat"><div class="ico">⌨️</div><h3>回顾键盘打分</h3><p>复习可以全程不动鼠标：<code>空格</code> 显示答案，<code>1 / 2 / 3</code> 忘记 / 记得 / 简单，答完自动翻下一张。答案没露出来时数字键不起作用，长按也不会把整队刷完。</p></div>
@@ -153,7 +154,7 @@
       <div class="feat"><div class="ico">🌙</div><h3>深色模式</h3><p>明暗主题随心切换，偏好本地记忆，夜间护眼。</p></div>
       <div class="feat"><div class="ico">🔎</div><h3>类型与站点筛选</h3><p>只看图片、只看链接、只看某个站——chip 上带着条数，和搜索、标签<b>取交集</b>。库里只有一种类型一个站点时筛选条不出现，最后一条图片被删掉后「图片」选项也跟着消失。</p></div>
       <div class="feat"><div class="ico">⌨️</div><h3>列表键盘流</h3><p><code>↑ / ↓</code> 移动焦点、<code>x</code> 勾选焦点那条、<code>Enter</code> 展开全文，删一排不用碰鼠标。按 <code>?</code> 随时查键位，浮层里列的就是真能按的那几个。</p></div>
-      <div class="feat"><div class="ico">🧑‍💻</div><h3>零构建开源</h3><p>MIT 协议、原生 JS、无运行时依赖，改完刷新即生效；985 项自动化测试守住每一次提交。</p></div>
+      <div class="feat"><div class="ico">🧑‍💻</div><h3>零构建开源</h3><p>MIT 协议、原生 JS、无运行时依赖，改完刷新即生效；1161 项自动化测试守住每一次提交。</p></div>
     </div>
   </section>
 
@@ -174,7 +175,7 @@
 
   <section id="install">
     <h2 class="sec-title">安装</h2>
-    <p class="sec-sub">开发者模式加载已解压的扩展，无需构建。当前版本 v1.10.0。</p>
+    <p class="sec-sub">开发者模式加载已解压的扩展，无需构建。当前版本 v1.11.0。</p>
     <div class="install"><code><span class="c"># 1. 获取代码</span>
 git clone https://github.com/liuxin1985/ClipKeep.git
 

@@ -19,7 +19,15 @@
 <script>
 /* 浏览器里跑 content.js 用的最小 chrome 桩 */
 (() => {
-  const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_trash: [], clipkeep_activity: {}, clipkeep_prefs: {} };
+  // 界面语言钉成中文：无头 Chrome 的界面语言是 en-US，偏好留空 = auto = 英文，
+  // 划词浮层那几帧会悄悄换成英文。?lang=en 留给「英文界面」那一帧单独抓。
+  const UI_LANG = (() => {
+    try {
+      const p = new URLSearchParams(location.search).get("lang");
+      return ["auto", "zh", "en"].indexOf(p) >= 0 ? p : "zh";
+    } catch (_) { return "zh"; }
+  })();
+  const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_trash: [], clipkeep_activity: {}, clipkeep_prefs: { lang: UI_LANG } };
   // ?seed=<encodeURIComponent(JSON)> 可以预置高亮：桩里的存储活不过一次加载，
   // 想把上一次划选出来的记录带到「刷新后」那一次启动来看重放，只能从 URL 带。
   // url 一律改成本页地址：content.js 按整页 URL（含 query）挑高亮，照抄种子自带的地址就永远匹配不上。
