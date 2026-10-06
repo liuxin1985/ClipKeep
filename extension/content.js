@@ -944,12 +944,33 @@
   }
   readLang();
 
+  /**
+   * 语言换了就把浮层拆掉，下次用时按新语言重建。
+   * 工具条和卡片都是建一次就缓存的 DOM，不拆会一直停在第一次建好时的那种语言。
+   * 卡片可能正被人打着字，开着（display: block）就不拆——丢用户的字比少一次翻译严重；
+   * 阅读层同理，开着就不动，退出再进就是新语言。
+   */
+  function refreshFloatingLang() {
+    if (!I18N) return;
+    if (toolbar) {
+      toolbar.remove();
+      toolbar = null;
+    }
+    if (card && card.style.display !== "block") {
+      card.remove();
+      card = null;
+    }
+    if (readerRoot) return; // 正文已按旧语言排好，重放标记只会半中半英，不如等用户自己退出
+    applyHighlights(); // 标记的批注提示是建标记时拼死的字符串，重放一次才会换语言
+  }
+
   // 跨标签页高亮实时同步
   if (API.storage && API.storage.onChanged) {
     API.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
       if (changes[HL_KEY]) applyHighlights();
-      if (changes[PREFS_KEY]) readLang(); // 弹窗里换了语言，页面浮层次一次就跟着换
+      // 弹窗里换了语言：先把新语言读进来，再拆掉缓存的浮层，这一次就把话换过来
+      if (changes[PREFS_KEY]) readLang().then(refreshFloatingLang);
     });
   }
 

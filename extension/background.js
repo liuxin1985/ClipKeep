@@ -750,23 +750,41 @@ function mergeItems(payload) {
 let langReady = null;
 
 /**
- * 服务 worker 每次醒来先定一次语言：菜单和 toast 都从文案层出，语言定晚了就赶不上这班车。
- * 只建一次（缓存这条 promise），免得每条消息都去读一遍存储。
+ * 读一次偏好并把语言定下来，返回「这次到底读着没有」。
  */
-function ensureLang() {
-  if (!langReady) {
-    langReady = (async () => {
-      if (!I18N) return "zh";
-      let p = "auto";
-      try {
-        const o = await API.storage.local.get(PREFS_KEY);
-        const prefs = o && o[PREFS_KEY];
-        if (prefs && ["auto", "zh", "en"].indexOf(prefs.lang) >= 0) p = prefs.lang;
-      } catch (_) { /* 读不到就按浏览器界面语言 */ }
-      return I18N.setLang(p);
-    })();
-  }
-  return langReady;
+function readLangOnce() {
+  return (async () => {
+    if (!I18N) return true;
+    let p = "auto";
+    try {
+      const o = await API.storage.local.get(PREFS_KEY);
+      const prefs = o && o[PREFS_KEY];
+      if (prefs && ["auto", "zh", "en"].indexOf(prefs.lang) >= 0) p = prefs.lang;
+    } catch (_) {
+      I18N.setLang(p); // 读不到就按浏览器界面语言，先有个能用的
+      return false;
+    }
+    I18N.setLang(p);
+    return true;
+  })();
+}
+
+/**
+ * 服务 worker 每次醒来先定一次语言：菜单和 toast 都从文案层出，语言定晚了就赶不上这班车。
+ * 成功读过就把这条 promise 缓存下来，免得每条消息都去读一遍存储。
+ * 读失败不算结论：那次只是「这一回没读着」，用户存的偏好还在。把它钉死，英文用户装完
+ * 扩展后菜单会一直是浏览器语言，而且要跟浏览器抢那一次——装扩展的事件可能比读取还早落地。
+ * 所以拿到失败结果的人会再读一次（最多补一次，避免存储真坏了时无限重试）。
+ */
+function ensureLang(noRetry) {
+  if (!langReady) langReady = readLangOnce();
+  const mine = langReady;
+  if (noRetry) return mine;
+  return mine.then((ok) => {
+    if (ok) return true;
+    if (langReady === mine) langReady = null;
+    return ensureLang(true);
+  });
 }
 ensureLang();
 

@@ -238,7 +238,9 @@
     "编号 + 来源标题"                                : "Number + source title",
     "网页上把选区一秒存进 ClipKeep"                      : "Save the selection to ClipKeep in one keystroke",
     "蓝色"                                       : "Blue",
-    "覆盖失败：{0}没有写入成功，本地内容未变，请重试"                : "Overwrite failed: {0} wasn't written. Local content is unchanged — please try again",
+    "覆盖失败：收藏没有写入成功，本地内容未变，请重试"                : "Overwrite failed: clips weren't written. Local content is unchanged — please try again",
+    "覆盖失败：高亮没有写入成功，本地内容未变，请重试"                : "Overwrite failed: highlights weren't written. Local content is unchanged — please try again",
+    "覆盖失败：收藏和高亮都没有写入成功，本地内容未变，请重试"          : "Overwrite failed: clips and highlights were not written. Local content is unchanged — please try again",
     "覆盖本地"                                     : "Overwrite local data",
     "记得"                                       : "Good",
     "设置"                                       : "Settings",
@@ -352,9 +354,11 @@
   function localize(node) {
     if (typeof document === "undefined") return;
     const scope = node || document;
+    // 一律走 setAttribute：title / placeholder 有同名 property，aria-* 没有，
+    // 写 el["aria-label"] 只会挂个没用的 JS 属性，读屏拿到的还是原来的中文
     const attr = (el, name, key) => {
       const v = el.getAttribute(key);
-      if (v !== null) el[name] = T(v);
+      if (v !== null) el.setAttribute(name, T(v));
     };
     scope.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = T(el.getAttribute("data-i18n")); });
     scope.querySelectorAll("[data-i18n-title]").forEach((el) => attr(el, "title", "data-i18n-title"));

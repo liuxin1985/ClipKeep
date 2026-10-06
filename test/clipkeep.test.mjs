@@ -32,6 +32,7 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 function makeBackend(opts) {
   const uiLanguage = (opts && opts.uiLanguage) || "zh-CN"; // jsdom 默认 en-US，会把中文断言整体翻成英文
   const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_prefs: {} };
+  if (opts && opts.failFirstGet) store.__failNextGet = true; // 冷启动那一次读偏好没读着（磁盘坏、配额异常之类）
   const listeners = [];
   const hlListeners = [];
   const commandListeners = [];
@@ -57,6 +58,10 @@ function makeBackend(opts) {
     storage: {
       local: {
         async get(keys) {
+          if (store.__failNextGet) {
+            store.__failNextGet = false;
+            throw new Error("STORAGE_UNAVAILABLE");
+          }
           const arr = Array.isArray(keys) ? keys : [keys];
           const o = {};
           arr.forEach((k) => { if (store[k] !== undefined) o[k] = JSON.parse(JSON.stringify(store[k])); });
@@ -4663,6 +4668,145 @@ async function testV111I18n() {
     ok("没有 i18n.js 时浮动条照常工作", !!w.document.querySelector(".clipkeep-toolbar"));
     ok("没有 i18n.js 时界面退回中文而不是报错", /收藏|高亮|批注/.test(w.document.querySelector(".clipkeep-toolbar").textContent),
       w.document.querySelector(".clipkeep-toolbar").textContent);
+  }
+
+  /* 12. 页面开着的时候改语言：浮层和已有标记都得跟着换，不能等用户刷新页面 */
+  {
+    const url = "http://localhost/i18n12";
+    const text = "量子比特可以同时处于两种状态";
+    const c = mountContent(url,
+      [{ id: "m1", url, text, color: "green", note: "重点", createdAt: 1 }],
+      `<p>${text}，这是并行性的来源。</p><p>第二段没有高亮，拿来选字。</p>`, { lang: "zh" });
+    await tick(30);
+    const mark = () => c.w.document.querySelector("mark.clipkeep-hl");
+    ok("中文界面下标记提示是中文", /^ClipKeep 批注：/.test(mark().title), mark().title);
+
+    // 高亮重放后第一段被拆成 mark + 裸文本，选字一律用没被标记过的第二段
+    const p0 = c.w.document.querySelectorAll("p")[1];
+    const sel = c.w.getSelection();
+    const r = c.w.document.createRange();
+    r.setStart(p0.firstChild, 0);
+    r.setEnd(p0.firstChild, 4);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    ok("先建出来的浮动条是中文", /收藏/.test(c.w.document.querySelector(".clipkeep-toolbar").textContent));
+
+    await c.chrome.storage.local.set({ clipkeep_prefs: { lang: "en" } });
+    await tick(40);
+    ok("改语言后标记提示跟着换", /^ClipKeep note:/.test(mark().title), mark().title);
+    ok("标记里的用户原文一字不动", mark().textContent === text, mark().textContent);
+
+    // 浮动条是 ensureToolbar 缓存的，不重建就会一直停在第一次建好时的那种语言
+    sel.removeAllRanges();
+    sel.addRange(r);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    const bar2 = c.w.document.querySelector(".clipkeep-toolbar");
+    ok("改语言后重新选字，浮动条是英文", !CJK.test(bar2.textContent), bar2.textContent);
+  }
+
+  /* 13. 改语言不能把用户正在写的批注卡片清空：那是人家打了一半的字 */
+  {
+    const url = "http://localhost/i18n13";
+    const c = mountContent(url, [], `<p>量子比特可以叠加</p>`, { lang: "zh" });
+    const p0 = c.w.document.querySelector("p");
+    const sel = c.w.getSelection();
+    const r = c.w.document.createRange();
+    r.setStart(p0.firstChild, 0);
+    r.setEnd(p0.firstChild, 4);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    c.w.document.querySelector(".clipkeep-btn-save").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(20);
+    const ta = c.w.document.querySelector("#clipkeep-card .clipkeep-note");
+    ta.value = "写到一半的想法";
+    await c.chrome.storage.local.set({ clipkeep_prefs: { lang: "en" } });
+    await tick(40);
+    const card = c.w.document.getElementById("clipkeep-card");
+    ok("打开着的卡片不会被换语言清掉", !!card, "卡片没了");
+    eq("用户输入原样留着", card.querySelector(".clipkeep-note").value, "写到一半的想法");
+  }
+
+  /* 14. data-i18n-aria 换的是属性，不是同名 JS 属性：aria-* 没有对应 property，写 el["aria-label"] 是空的 */
+  {
+    const p = await mountPopup({ clipkeep_prefs: { lang: "en" } });
+    await tick(20);
+    const el = p.w.document.createElement("i");
+    el.setAttribute("data-i18n-aria", "搜索收藏内容…");
+    p.w.document.body.appendChild(el);
+    p.w.ClipKeepI18N.localize(p.w.document);
+    const got = String(el.getAttribute("aria-label") || "");
+    ok("aria-label 属性真的被写上了", !!got, "属性还是空的，只写了个同名 JS 属性");
+    ok("aria-label 跟着语言走", !CJK.test(got), got);
+    eq("aria-label 就是当前语言的译文", got, p.w.ClipKeepI18N.T("搜索收藏内容…"));
+  }
+
+  /* 15. 覆盖失败的话术：类别不能当词块塞进句子——英文 "Clip / Highlight wasn't written" 是病句 */
+  {
+    const stubOne = (chrome, type, res) => {
+      const orig = chrome.runtime.sendMessage.bind(chrome);
+      chrome.runtime.sendMessage = (msg, cb) => {
+        if (!msg || msg.type !== type) return orig(msg, cb);
+        if (typeof cb === "function") cb(res);
+        return Promise.resolve(res);
+      };
+    };
+    const err = { ok: false, error: "Error: QUOTA_EXCEEDED" };
+    const mkItem = (id, text) => ({ id, text, note: "", tags: [], url: "", title: "", createdAt: 1 });
+    const bk = { app: "ClipKeep", version: 1,
+      items: [mkItem("w2", "备份收藏")],
+      highlights: [{ id: "h2", text: "备份高亮", url: "http://localhost/i18n15", color: "yellow", createdAt: 1 }] };
+
+    const both = await mountPopup({ clipkeep_prefs: { lang: "en" }, clipkeep_items: [mkItem("w1", "本地收藏")] });
+    stubOne(both.chrome, "clipkeep:replace", err);
+    stubOne(both.chrome, "clipkeep:hl-replace", err);
+    await both.putBackup(bk);
+    await both.click(both.$("modal-alt"));
+    await tick(40);
+    const tb = both.$("toast").textContent;
+    ok("两类都失败：整条提示没有中文", !CJK.test(tb), tb);
+    ok("两类都失败：两类都点名", /clip/i.test(tb) && /highlight/i.test(tb), tb);
+    ok("两类都失败：谓语跟着复数走，不用 was", !/was(?:n'?| not)\b/i.test(tb) && /were\b/i.test(tb), tb);
+    ok("两类都失败：不是拿斜杠拼两个词", !/\s\/\s/.test(tb), tb);
+    eq("两类都失败：本地内容确实没动", both.store.clipkeep_items.length, 1);
+
+    const onlyHl = await mountPopup({ clipkeep_prefs: { lang: "en" }, clipkeep_items: [mkItem("w1", "本地收藏")] });
+    stubOne(onlyHl.chrome, "clipkeep:hl-replace", err);
+    await onlyHl.putBackup(bk);
+    await onlyHl.click(onlyHl.$("modal-alt"));
+    await tick(40);
+    const th = onlyHl.$("toast").textContent;
+    ok("只有高亮失败：不牵连收藏", !/clip/i.test(th) && /highlight/i.test(th), th);
+
+    const zh = await mountPopup({ clipkeep_prefs: { lang: "zh" }, clipkeep_items: [mkItem("w1", "本地收藏")] });
+    stubOne(zh.chrome, "clipkeep:replace", err);
+    stubOne(zh.chrome, "clipkeep:hl-replace", err);
+    await zh.putBackup(bk);
+    await zh.click(zh.$("modal-alt"));
+    await tick(40);
+    const tz = zh.$("toast").textContent;
+    ok("中文提示照旧说清两类", /收藏和高亮都没有写入成功/.test(tz), tz);
+  }
+
+  /* 16. 冷启动那一次读偏好失败不能把语言钉死一整轮：下一条消息还要能补读 */
+  {
+    const be = makeBackend({ uiLanguage: "zh-CN", failFirstGet: true });
+    be.store.clipkeep_prefs = { lang: "en" };
+    await be.fireInstalled("install");
+    await tick(30);
+    const titles = be.menuOps.created.map((m) => m.title).join(" | ");
+    ok("装完的菜单按存好的偏好出，不按兜底语言", !!titles && !CJK.test(titles), titles);
+
+    be.store.__failNextSet = true;
+    await be.fireMenuClick({ menuItemId: "clipkeep-save", selectionText: "量子比特", pageUrl: "http://a/1" },
+      { id: 1, title: "页面", url: "http://a/1" });
+    await tick(30);
+    const toasts = be.sentToTab.map((s) => s.msg.message).join("|");
+    ok("失败提示也跟上补读后的语言", !!toasts && !CJK.test(toasts), toasts);
   }
 }
 

@@ -1656,9 +1656,14 @@
     closeRestoreModal();
     await load();
     if (!written.itemsOk || !written.hlOk) {
-      // 后台没写成功就别报「已覆盖」：说清楚哪一类没进去，本地内容还是原样
-      const bad = [!written.itemsOk ? T("收藏") : "", !written.hlOk ? T("高亮") : ""].filter(Boolean).join(" / ");
-      toast(T("覆盖失败：{0}没有写入成功，本地内容未变，请重试", [bad]));
+      // 后台没写成功就别报「已覆盖」：说清楚哪一类没进去，本地内容还是原样。
+      // 三种情况各配整句：把「收藏 / 高亮」这种词块塞进句子，英文就成了
+      // "Clip / Highlight wasn't written"——两个名词配单数动词，还在句中大写。
+      toast(!written.itemsOk && !written.hlOk
+        ? T("覆盖失败：收藏和高亮都没有写入成功，本地内容未变，请重试")
+        : !written.itemsOk
+          ? T("覆盖失败：收藏没有写入成功，本地内容未变，请重试")
+          : T("覆盖失败：高亮没有写入成功，本地内容未变，请重试"));
       return;
     }
     toast(T("已用备份覆盖：共 {0} 收藏 · {1} 高亮{2}", [written.items, written.hl, truncNote(written.truncated)]));
