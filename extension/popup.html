@@ -119,6 +119,15 @@
         <span>Obsidian front-matter</span>
         <input id="set-fm" type="checkbox" />
       </label>
+      <!-- 数据自检：库里到底有什么、哪里和页面对不上，一屏看完还能一键导出元数据 -->
+      <div class="set-row set-diag">
+        <span data-i18n="数据自检">数据自检</span>
+        <span class="set-diag-btns">
+          <button id="btn-diag" class="mini-btn" data-i18n="重新自检" data-i18n-title="按存储里的数据重新算一遍" title="按存储里的数据重新算一遍">重新自检</button>
+          <button id="btn-diag-export" class="mini-btn" data-i18n="导出诊断" data-i18n-title="导出只含元数据的诊断 JSON，不含收藏正文" title="导出只含元数据的诊断 JSON，不含收藏正文">导出诊断</button>
+        </span>
+      </div>
+      <div class="diag" id="diag"></div>
       <p class="set-hint" data-i18n="快捷键 Alt+Shift+K 秒存当前选区；设置只存在本地。">快捷键 Alt+Shift+K 秒存当前选区；设置只存在本地。</p>
     </section>
 

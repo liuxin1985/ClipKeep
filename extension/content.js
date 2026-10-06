@@ -755,6 +755,32 @@
     }
   }
 
+  /**
+   * 数据自检用的「重放一遍看谁回不来」：只算不改。
+   * 每次现读存储，不用页面里已画好的标记当事实——自检要回答的正是「库里记的和页面对不对得上」，
+   * 拿渲染结果反推等于把同一个 bug 当证据。读不到就报 not-ok，绝不回一张空表冒充「都没丢」。
+   * 定位口径必须和 applyHighlights 用的是同一份整页文字（pageFlat），
+   * 否则页面上已经有标记时，我们看到的文本比抓锚点时少一截，会把本来能回来的条数错报成丢失。
+   * 预览截到 60 字：诊断结果会进面板和导出文件，不能把整篇正文搬过去。
+   */
+  const DIAG_PREVIEW = 60;
+
+  async function replayReport() {
+    const list = await getHighlights();
+    if (!list) return null;
+    const pageKey = normUrl(location.href);
+    const flat = pageFlat();
+    const mine = list.filter((h) => h && h.text && normUrl(h.url) === pageKey);
+    const missing = [];
+    let placed = 0;
+    for (const hl of mine) {
+      if (resolveHighlight(hl, flat)) placed++;
+      // 预览只给面板看，条数之外再带上原文长度：导出文件里靠它说「丢了多大一块」，不必搬正文
+      else missing.push({ id: String(hl.id || ""), text: String(hl.text).slice(0, DIAG_PREVIEW), len: String(hl.text).length });
+    }
+    return { page: pageKey, stored: mine.length, placed, missing };
+  }
+
   // 点击已有高亮：编辑批注 / 删除
   document.addEventListener("click", async (e) => {
     const mark = e.target.closest && e.target.closest("." + NS + "-hl");
@@ -926,6 +952,13 @@
         if (readerRoot) exitReader();
         else enterReader();
         sendResponse({ ok: true });
+      } else if (msg.type === "clipkeep:diag") {
+        // 异步应答：读存储要等，监听器必须 return true 才能把这条消息的通道留住。
+        // 算不出来一律回 not-ok：弹窗宁可显示「这个页面打不通」，也不要拿半截数字当真
+        replayReport()
+          .then((diag) => sendResponse(diag ? { ok: true, diag } : { ok: false, error: "storage_unavailable" }))
+          .catch(() => sendResponse({ ok: false, error: "replay_failed" }));
+        return true;
       }
     });
   }

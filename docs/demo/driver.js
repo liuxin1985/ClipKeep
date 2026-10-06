@@ -88,6 +88,22 @@
       click(q('#btn-theme'));
       click(qa('#list .item input[data-act="sel"]')[1]);
     },
+    revfilter: async () => {
+      await until(listReady);
+      click(q('.tab[data-view="review"]'));
+      await until(() => q('#revfilter [data-rtag]'));
+      click(q('#revfilter [data-rtag="笔记"]'));
+      await until(() => q('#revfilter .chip.active'));
+      q("#revfilter").scrollIntoView({ block: "start" });
+    },
+    diag: async () => {
+      await until(listReady);
+      click(q('#btn-settings'));
+      await until(() => q('#diag .diag-row'));
+      // 滚到设置区底部：这里露的是「当前页面几条定位不回 / 上次备份差几条」这几行，
+      // 面板顶部被切一行反而说明「上面还有内容」；切在底部看着就像界面坏了。
+      q("#diag").scrollIntoView({ block: "end" });
+    },
   };
 
   addEventListener("DOMContentLoaded", async () => {

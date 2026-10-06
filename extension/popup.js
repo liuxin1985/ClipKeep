@@ -94,6 +94,7 @@
   const batchTextEl = $("batch-text");
   const filterEl = $("filterbar");
   const keysEl = $("keys-help");
+  const diagEl = $("diag");
 
   let items = [];
   let marks = []; // 网页高亮 / 批注
@@ -112,6 +113,10 @@
   let mutating = false; // 列表写操作在途：连点会对着已经消失的数据再发一遍，提示就成了谎话
   let heatDay = ""; // 热力图里点开要看明细的那一天，空表示没展开
   let selected = new Set(); // 批量操作选中的收藏 id，跨搜索 / 排序保留
+  let revTag = ""; // 回顾队列的标签筛选，和列表的 activeTag 各管各的
+  let revSite = ""; // 回顾队列的站点筛选
+  let diag = null; // 最近一次数据自检的结果
+  let diagBusy = false; // 自检在途：连着点「重新自检」不该并排跑两遍
 
   function toast(msg) {
     toastEl.textContent = msg;
@@ -229,9 +234,33 @@
       .filter((it) => ensureReview(it).due <= now)
       .sort((a, b) => ensureReview(a).due - ensureReview(b).due);
   }
-  /** 今日队列 = 到期内容按最早优先，截断到每日上限 */
-  function queue() {
-    return dueItems().slice(0, reviewPrefs().cap);
+
+  /**
+   * 回顾筛选的条件由「今天到期的这批」生成，不是全库：
+   * 一个标签的三条都复习完了，它的 chip 就该消失，而不是留一个点了必然为空的按钮。
+   * 但用户点过的条件本身不丢：队列停在「这批没了」的说明上，交回给他自己清除，
+   * 悄悄换成别的内容等于替用户改了主意。
+   */
+  function revFacets(due) {
+    const tags = new Map();
+    const sites = new Map();
+    for (const it of due) {
+      for (const t of (it && it.tags) || []) tags.set(t, (tags.get(t) || 0) + 1);
+      const h = String(it && it.url ? hostname(it.url) : "");
+      if (h) sites.set(h, (sites.get(h) || 0) + 1);
+    }
+    return { tags, sites };
+  }
+
+  /** 到期内容按回顾筛选挑一遍；chip 的计数和队列用的是同一份，两边不会说话不一致 */
+  function dueFiltered(allDue) {
+    const due = allDue || dueItems();
+    if (!revTag && !revSite) return due;
+    return due.filter((it) => {
+      if (revTag && !((it && it.tags) || []).includes(revTag)) return false;
+      if (revSite && String(it && it.url ? hostname(it.url) : "") !== revSite) return false;
+      return true;
+    });
   }
 
   /* ---------- 数据加载 ---------- */
@@ -405,7 +434,7 @@
         const ib = KIND_ORDER.indexOf(b);
         return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
       })
-      .map((k) => `<button class="chip ${k === activeKind ? "active" : ""}" data-kind="${esc(k)}">${esc(KIND_LABELS[k] || k)} ${kinds.get(k)}</button>`)
+      .map((k) => `<button class="chip ${k === activeKind ? "active" : ""}" data-kind="${esc(k)}">${esc(kindLabel(k))} ${kinds.get(k)}</button>`)
       .join("");
     const sorted = [...sites.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const shown = sorted.slice(0, SITE_CHIPS_MAX);
@@ -876,7 +905,10 @@
   $("btn-settings").addEventListener("click", () => {
     settingsEl.hidden = !settingsEl.hidden;
     $("btn-settings").classList.toggle("active", !settingsEl.hidden);
+    if (!settingsEl.hidden) collectDiag(); // 一打开就现算，不用多点一下才看见现状
   });
+  $("btn-diag").addEventListener("click", collectDiag);
+  $("btn-diag-export").addEventListener("click", exportDiag);
   $("set-cap").addEventListener("change", (e) => savePrefs("review", { cap: Number(e.target.value) }));
   $("set-mult").addEventListener("change", (e) => savePrefs("review", { mult: Number(e.target.value) }));
   $("set-ttl").addEventListener("change", (e) => savePrefs("trash", { mins: Number(e.target.value) }));
@@ -888,6 +920,7 @@
     prefs = { ...prefs, lang: LANGS.indexOf(e.target.value) >= 0 ? e.target.value : "auto" };
     applyLang();
     await API.storage.local.set({ [PREFS_KEY]: prefs });
+    renderDiag(); // 自检面板就摊在语言选择器下面，不重画会留一整屏旧语言
     render();
   });
 
@@ -998,18 +1031,55 @@
 
   /* ---------- 回顾视图 ---------- */
 
+  /**
+   * 回顾筛选条：chip 只由今天到期的内容生成，点了就把队列缩到这一批。
+   * 到期内容只有一个标签、一个站点时没什么好筛的，不铺一排按钮占地方。
+   * 但用户已经选定的条件要一直留着「清除筛选」这条路——这批复习完时，
+   * 悄悄丢掉筛选、换成别的内容，等于替用户改了主意，也让他找不到回全库的入口。
+   */
+  function revFilterHtml(allDue) {
+    const due = allDue || dueItems();
+    const { tags, sites } = revFacets(due);
+    const tagSorted = [...tags.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+    const siteSorted = [...sites.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    if (!revTag && !revSite && (!due.length || (tags.size < 2 && siteSorted.length < 2))) return "";
+    const shownTags = tagSorted.slice(0, SITE_CHIPS_MAX);
+    const shownSites = siteSorted.slice(0, SITE_CHIPS_MAX);
+    const tagHtml = tagSorted.length < 2 ? ""
+      : shownTags.map(([t, n]) => `<button class="chip ${t === revTag ? "active" : ""}" data-rtag="${esc(t)}" title="${esc(t)}">${esc(t)} ${n}</button>`).join("")
+        + (tagSorted.length > shownTags.length
+            ? `<span class="f-more" title="${T("还有 {0} 个标签没有列出，先用搜索或去掉筛选", [tagSorted.length - shownTags.length])}">${T("+{0} 标签", [tagSorted.length - shownTags.length])}</span>`
+            : "");
+    const siteHtml = siteSorted.length < 2 ? ""
+      : shownSites.map(([h, n]) => `<button class="chip site ${h === revSite ? "active" : ""}" data-rsite="${esc(h)}" title="${esc(h)}">${esc(h)} ${n}</button>`).join("")
+        + (siteSorted.length > shownSites.length
+            ? `<span class="f-more" title="${T("还有 {0} 个站点没有列出，用搜索找它们的域名", [siteSorted.length - shownSites.length])}">${T("+{0} 站", [siteSorted.length - shownSites.length])}</span>`
+            : "");
+    const clear = revTag || revSite
+      ? `<button class="mini-btn" data-act="rev-clear">${T("清除筛选")}</button>`
+      : "";
+    return `<section class="revfilter" id="revfilter">${tagHtml}${siteHtml}${clear}</section>`;
+  }
+
   function renderReview() {
     const { cap } = reviewPrefs();
-    const due = dueItems();
-    const queued = queue();
+    const allDue = dueItems();
+    const due = dueFiltered(allDue); // 进度、上限、剩余条数全按筛完的这批算
+    const queued = due.slice(0, cap);
     const heat = heatHtml();
+    const bar = revFilterHtml(allDue);
     if (!items.length) {
       reviewEl.innerHTML = heat + `<div class="empty"><div class="empty-ico">🔁</div><p>${T("还没有可回顾的内容")}</p><span>${T("先去网页上划词收藏几条吧。")}</span></div>`;
       return;
     }
+    if (!queued.length && (revTag || revSite) && allDue.length) {
+      // 库里明明还有到期内容，却因筛选一条不剩：这句不能说「今日回顾已完成」
+      reviewEl.innerHTML = heat + bar + `<div class="empty"><div class="empty-ico">🔍</div><p>${T("这个筛选条件下没有要回顾的")}</p><span>${T("换一个标签 / 站点，或清除筛选看全库的到期内容。")}</span></div>`;
+      return;
+    }
     if (!queued.length) {
       const next = items.map((it) => ensureReview(it).due).sort((a, b) => a - b)[0];
-      reviewEl.innerHTML = heat + `<div class="empty done"><div class="empty-ico">🎉</div><p>${T("今日回顾已完成")}</p><span>${T("下一条将在 {0} 到期。明天再来 ~", [fmtDate(next)])}</span></div>`;
+      reviewEl.innerHTML = heat + bar + `<div class="empty done"><div class="empty-ico">🎉</div><p>${T("今日回顾已完成")}</p><span>${T("下一条将在 {0} 到期。明天再来 ~", [fmtDate(next)])}</span></div>`;
       return;
     }
     const it = queued[0];
@@ -1027,7 +1097,7 @@
       ? `<span class="badge-kind">${kindLabel(it.kind)}</span>` + mediaLinkHtml(it)
       : "";
     const capNote = due.length > queued.length ? T(" · 今日上限 {0} 条，剩余 {1} 条明天继续", [cap, due.length - queued.length]) : "";
-    reviewEl.innerHTML = heat + `
+    reviewEl.innerHTML = heat + bar + `
       <div class="rev-progress">${T("本组待回顾 {0} 条 · 记忆盒 {1}/{2}", [queued.length, r.box, INTERVALS.length - 1])}${capNote}</div>
       <p class="rev-keys">${T("快捷键：")}<kbd>${T("空格")}</kbd> ${T("显示答案")} · <kbd>1</kbd> ${T("忘记")} · <kbd>2</kbd> ${T("记得")} · <kbd>3</kbd> ${T("简单")}</p>
       <div class="rev-card" data-id="${esc(it.id)}">
@@ -1089,6 +1159,22 @@
       // 点格子下钻当天明细；没打卡的格子点了不展开，再点一次收起
       const day = cell.dataset.day;
       heatDay = Number(cell.dataset.n) > 0 ? (heatDay === day ? "" : day) : "";
+      render();
+      return;
+    }
+    // 回顾筛选条的 chip 和「清除筛选」都在这容器里：得在找卡片之前处理，
+    // 否则筛到空时页面没有卡片，下面那句 return 会把点击吞掉
+    const chip = e.target.closest("#revfilter .chip");
+    if (chip) {
+      if (chip.dataset.rtag !== undefined) revTag = revTag === chip.dataset.rtag ? "" : chip.dataset.rtag;
+      else if (chip.dataset.rsite !== undefined) revSite = revSite === chip.dataset.rsite ? "" : chip.dataset.rsite;
+      else return;
+      render();
+      return;
+    }
+    if (e.target.closest('[data-act="rev-clear"]')) {
+      revTag = "";
+      revSite = "";
       render();
       return;
     }
@@ -1473,6 +1559,237 @@
     setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
+  /* ---------- 数据自检 ---------- */
+
+  const DIAG_ROWS_MAX = 5; // 面板里每类问题最多列几条，超出只报总数，别把设置撑成一堵墙
+
+  /** 按 UTF-8 数字节：中文一个字三个字节，拿 length 当大小会把存储说小三倍 */
+  function utf8Bytes(s) {
+    let n = 0;
+    for (const ch of String(s)) {
+      const c = ch.codePointAt(0);
+      n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    }
+    return n;
+  }
+
+  function fmtSize(b) {
+    const n = Number(b);
+    if (!Number.isFinite(n) || n < 0) return "";
+    if (n < 1024) return T("{0} 字节", [Math.round(n)]);
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+
+  /**
+   * 浏览器报的实际占用：不是每台浏览器都有这个接口（Safari 的适配层、老版本都可能缺），
+   * 也没有配额可报。缺就如实说缺，宁可少一行，也不要拿 0 冒充「没占空间」。
+   */
+  async function bytesInUse() {
+    const local = API.storage && API.storage.local;
+    const f = local && local.getBytesInUse;
+    if (typeof f !== "function") return null;
+    try {
+      const n = Number(await f.call(local, null));
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** 问当前标签页的脚本「这条高亮还在不在」。页面不通就如实标记，不摆上一屏的数字 */
+  async function pageReplay() {
+    let url = "";
+    try {
+      const tabs = await API.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id) return { state: "no_tab", url: "" };
+      url = String(tab.url || "");
+      const res = await API.tabs.sendMessage(tab.id, { type: "clipkeep:diag" });
+      if (!res || !res.ok || !res.diag) return { state: "unreachable", url };
+      const d = res.diag;
+      return {
+        state: "ok",
+        url,
+        stored: Number(d.stored) || 0,
+        placed: Number(d.placed) || 0,
+        missing: (Array.isArray(d.missing) ? d.missing : []).map((m) => ({
+          id: String((m && m.id) || ""),
+          text: String((m && m.text) || ""),
+          len: Number(m && m.len) || 0,
+        })),
+      };
+    } catch (_) {
+      return { state: "unreachable", url };
+    }
+  }
+
+  const dueCountOf = (list, now) => (list || []).filter((it) => !it || !it.review || !(Number(it.review.due) > now)).length;
+
+  function reviewedTotal(log) {
+    let n = 0;
+    if (log && typeof log === "object") {
+      for (const k of Object.keys(log)) n += activityOf(log[k]).n;
+    }
+    return n;
+  }
+
+  /** 自检一律现读存储：弹窗里那份 items 可能是几分钟前的快照，别拿旧的当库里现状 */
+  async function collectDiag() {
+    if (diagBusy) return;
+    diagBusy = true;
+    try {
+      const keys = [STORAGE_KEY, HL_KEY, TRASH_KEY, PREFS_KEY, ACTIVITY_KEY];
+      const obj = await API.storage.local.get(keys);
+      const its = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
+      const hls = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
+      const tr = Array.isArray(obj[TRASH_KEY]) ? obj[TRASH_KEY] : [];
+      const p = obj[PREFS_KEY] && typeof obj[PREFS_KEY] === "object" ? obj[PREFS_KEY] : {};
+      const mins = trashMinsOf(p);
+      const ttl = mins * 60000;
+      const now = Date.now();
+      // 过期但还没被后台清掉的条目不算数：面板说的是「现在还能撤回来的东西」
+      const alive = tr.filter((t) => t && t.item && now - (Number(t.deletedAt) || 0) <= ttl);
+      diag = {
+        at: now,
+        error: false,
+        items: its.length,
+        highlights: hls.length,
+        trash: alive.length,
+        trashMins: mins,
+        trashLeftMin: alive.length
+          ? Math.max(0, Math.ceil((Math.min(...alive.map((t) => (Number(t.deletedAt) || 0) + ttl)) - now) / 60000))
+          : null,
+        bytesSelf: utf8Bytes(JSON.stringify(obj)),
+        bytesInUse: await bytesInUse(),
+        quota: Number(API.storage.local.QUOTA_BYTES) || 0,
+        truncated: its
+          .filter((x) => x && x.truncated)
+          .map((x) => ({
+            id: String(x.id || ""),
+            title: String(x.title || (x.url ? hostname(x.url) : "")).slice(0, 60),
+            len: String(x.text || "").length,
+          })),
+        page: await pageReplay(),
+        backup: p.lastBackup && typeof p.lastBackup === "object" && Number(p.lastBackup.at) > 0
+          ? {
+            at: Number(p.lastBackup.at),
+            items: Number(p.lastBackup.items) || 0,
+            highlights: Number(p.lastBackup.highlights) || 0,
+          }
+          : null, // 没有时间戳的基线（手改过的存储、旧版本残留）不算备份：宁可说「还没备份过」，也不摆 1970 年
+        due: dueCountOf(its, now),
+        reviewed: reviewedTotal(obj[ACTIVITY_KEY]),
+      };
+    } catch (_) {
+      diag = { error: true };
+    } finally {
+      diagBusy = false;
+      renderDiag();
+    }
+  }
+
+  function renderDiag() {
+    if (!diagEl) return;
+    diagEl.innerHTML = diagHtml();
+  }
+
+  function diagHtml() {
+    const d = diag;
+    if (!d) return `<p class="diag-note">${T("还没跑过自检。")}</p>`;
+    if (d.error) return `<p class="diag-note diag-warn">${T("存储读不到，自检没跑成。")}</p>`;
+    const rows = [];
+    rows.push(`<p class="diag-row">${T("收藏 {0} 条 · 高亮 {1} 条 · 回收站 {2} 条", [d.items, d.highlights, d.trash])}</p>`);
+
+    const size = d.bytesInUse === null
+      ? T("数据大小 {0}（这个浏览器不报存储占用）", [fmtSize(d.bytesSelf)])
+      : T("数据大小 {0} · 存储占用 {1}", [fmtSize(d.bytesSelf), fmtSize(d.bytesInUse)]);
+    rows.push(`<p class="diag-row">${d.quota ? size + T(" · 配额 {0}", [fmtSize(d.quota)]) : size}</p>`);
+
+    if (d.truncated.length) {
+      const listed = d.truncated.slice(0, DIAG_ROWS_MAX)
+        .map((x) => esc(x.title || x.id || T("（没有标题）"))).join("、");
+      rows.push(`<p class="diag-row diag-warn">${T("正文被 {0} 字上限砍短 {1} 条", [MAX_TEXT, d.truncated.length])}`
+        + (d.truncated.length > DIAG_ROWS_MAX ? T("，只列前 {0} 条", [DIAG_ROWS_MAX]) : "")
+        + `：${listed}</p>`);
+    } else {
+      rows.push(`<p class="diag-row">${T("没有正文被砍短的收藏")}</p>`);
+    }
+
+    rows.push(`<p class="diag-row">${d.trash === 0
+      ? T("回收站是空的")
+      : T("回收站 {0} 条 · 最早一条约 {1} 分钟后清掉", [d.trash, d.trashLeftMin])}</p>`);
+
+    const pg = d.page || { state: "no_tab" };
+    if (pg.state === "ok") {
+      if (!pg.stored) {
+        rows.push(`<p class="diag-row">${T("这个页面没有高亮记录")}</p>`);
+      } else {
+        rows.push(`<p class="diag-row${pg.missing.length ? " diag-warn" : ""}">`
+          + T("当前页面：存 {0} 条高亮，标出 {1} 条，{2} 条定位不回", [pg.stored, pg.placed, pg.missing.length]) + `</p>`);
+        pg.missing.slice(0, DIAG_ROWS_MAX).forEach((m) => rows.push(`<p class="diag-sub">→ ${esc(m.text || m.id)}</p>`));
+        if (pg.missing.length > DIAG_ROWS_MAX) rows.push(`<p class="diag-sub">${T("另有 {0} 条没有列出", [pg.missing.length - DIAG_ROWS_MAX])}</p>`);
+      }
+    } else {
+      rows.push(`<p class="diag-row diag-warn">${T("这个页面打不通：可能是浏览器自带页，或扩展刚更新完需要重开页面")}</p>`);
+    }
+
+    rows.push(`<p class="diag-row">${T("今日到期 {0} 条 · 累计复习 {1} 条", [d.due, d.reviewed])}</p>`);
+
+    if (!d.backup) {
+      rows.push(`<p class="diag-row">${T("还没备份过")}</p>`);
+    } else {
+      const diff = d.items + d.highlights - (d.backup.items + d.backup.highlights);
+      rows.push(`<p class="diag-row">${T("上次备份 {0} 条（{1}）· 现在 {2} 条", [d.backup.items + d.backup.highlights, fmtDate(d.backup.at), d.items + d.highlights])}`
+        + (diff > 0 ? T(" · {0} 条还没进备份", [diff])
+          : diff < 0 ? T(" · 比上次少了 {0} 条（删除不会从备份里消失）", [-diff]) : T(" · 数据没有变化"))
+        + `</p>`);
+    }
+    return rows.join("");
+  }
+
+  /**
+   * 诊断文件只写元数据：条数、字节、被砍短的是哪几条（标题 + 长度）、页面重放的缺口。
+   * 收藏正文一个字都不写进去——用户是拿它来问「哪里坏了」，不是拿它到处发自己的读书笔记。
+   * 页面上定位不回的那几条也只留编号和长度：面板里那 60 字预览是给自己认条目用的，
+   * 文件却常常要贴进 issue，把高亮原文一起搬进去就是另一回事了。
+   */
+  function exportDiag() {
+    if (!diag || diag.error) {
+      toast(diag ? T("存储读不到，先别导出诊断") : T("自检还在跑，稍等一下再导出"));
+      return;
+    }
+    const mf = API.runtime && API.runtime.getManifest ? API.runtime.getManifest() : null;
+    const pg = diag.page || { state: "no_tab" };
+    const data = {
+      app: "ClipKeep",
+      kind: "diagnostics",
+      version: (mf && mf.version) || "",
+      generatedAt: new Date(diag.at).toISOString(),
+      counts: { items: diag.items, highlights: diag.highlights, trash: diag.trash, due: diag.due, reviewed: diag.reviewed },
+      bytes: {
+        self: diag.bytesSelf,
+        inUse: diag.bytesInUse,
+        quota: diag.quota || null,
+        trashMins: diag.trashMins,
+        trashLeftMin: diag.trashLeftMin,
+      },
+      truncated: diag.truncated,
+      page: pg.state === "ok"
+        ? {
+          state: pg.state,
+          url: pg.url,
+          stored: pg.stored,
+          placed: pg.placed,
+          missing: pg.missing.map((m) => ({ id: m.id, len: m.len })),
+        }
+        : { state: pg.state },
+      backup: diag.backup,
+    };
+    download(JSON.stringify(data, null, 2), `clipkeep-diagnostics-${Date.now()}.json`, "application/json");
+    toast(T("已导出诊断 JSON（不含收藏正文）"));
+  }
+
   /* ---------- JSON 备份 / 恢复 ---------- */
 
   async function backup() {
@@ -1486,6 +1803,13 @@
     };
     if (!data.items.length && !data.highlights.length) return toast(T("没有可备份的数据"));
     download(JSON.stringify(data, null, 2), `clipkeep-backup-${Date.now()}.json`, "application/json");
+    // 记下这次备份了多少：自检靠这个基线说「还有几条没进备份」，
+    // 只写存储不写内存里那份 prefs，下一次改设置整包写回时基线就悄悄没了
+    await savePrefs("lastBackup", {
+      at: Date.now(),
+      items: data.items.length,
+      highlights: data.highlights.length,
+    });
     toast(T("已备份 {0} 条收藏 · {1} 条高亮", [data.items.length, data.highlights.length]));
   }
 

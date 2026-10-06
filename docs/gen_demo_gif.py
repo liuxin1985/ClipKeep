@@ -130,6 +130,8 @@ def paste_fit(im, shot, box, anchor_right=False, dim=0):
 
 
 # 帧序：(截图名, 地址栏, 说明文字)
+# 说明文字开头的带圈序号必须从 ① 连续排到底，测试会盯着这条——插一帧忘了改号，
+# README 上就会出现两个 ⑫ 或者跳号的动图。
 FRAMES = [
     ("w_sel", "example.com/quantum-computing", "① 网页上划选文字，工具条浮出：收藏 / 高亮 / 批注 / 净化阅读"),
     ("w_card", "example.com/quantum-computing", "② 点「★ 收藏」，顺手写下备注和标签——只存本地，不传服务器"),
@@ -142,10 +144,12 @@ FRAMES = [
     ("p_keys", "example.com/quantum-computing", "⑨ 按 ? 随时查键位，浮层里列的就是真能按的那几个"),
     ("p_marks", "example.com/quantum-computing", "⑩ 高亮按页面归组，四色轮转，批注跟着原文一起留档"),
     ("p_review", "example.com/quantum-computing", "⑪ 每日回顾：间隔重复排期 + 打卡热力图，收藏不再是黑洞"),
-    ("p_reveal", "example.com/quantum-computing", "⑫ 空格翻答案，1 / 2 / 3 打分，整批删除也能一次撤销"),
-    ("p_trash", "example.com/quantum-computing", "⑬ 回收站明细：撤销只管最近一批，想捞哪一条就点哪一条"),
-    ("p_dark", "example.com/quantum-computing", "⑭ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
-    ("p_en", "example.com/quantum-computing", "⑮ 界面语言跟着偏好走：中文 / English 用的是同一份代码"),
+    ("p_revfilter", "example.com/quantum-computing", "⑫ 回顾也能只看一批：按标签 / 站点筛完，只复习正在推进的那件事"),
+    ("p_reveal", "example.com/quantum-computing", "⑬ 空格翻答案，1 / 2 / 3 打分，整批删除也能一次撤销"),
+    ("p_trash", "example.com/quantum-computing", "⑭ 回收站明细：撤销只管最近一批，想捞哪一条就点哪一条"),
+    ("p_diag", "example.com/quantum-computing", "⑮ 数据自检：哪条高亮定位不回、几条被字数上限砍短，一屏看完还能导出诊断"),
+    ("p_dark", "example.com/quantum-computing", "⑯ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
+    ("p_en", "example.com/quantum-computing", "⑰ 界面语言跟着偏好走：中文 / English 用的是同一份代码"),
 ]
 
 

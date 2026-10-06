@@ -38,6 +38,9 @@
     clipkeep_highlights: [
       { id: "h1", url: "https://en.wikipedia.org/wiki/Quantum_computing_(history)", title: "量子计算入门：从比特到量子比特",
         text: "量子并行让我们有机会一次评估指数级多的输入分支", color: "yellow", note: "再看一遍干涉那两句", createdAt: Date.now() - 3600000 },
+      // 这条是「页面上已经找不到」的那一类：句子不在演示文章里，自检面板就该把它列成定位不回
+      { id: "h4", url: "https://en.wikipedia.org/wiki/Quantum_computing_(history)", title: "量子计算入门：从比特到量子比特",
+        text: "玻恩规则把测得某个结果的概率交给振幅的平方，这一步至今仍是解释的争点", color: "blue", note: "", createdAt: Date.now() - 1800000 },
       { id: "h2", url: "https://example.com/notes/spaced-repetition", title: "关于复习",
         text: "把笔记只存进收藏夹而不复习，就等于没有存", color: "pink", note: "ClipKeep 做回顾的理由", createdAt: Date.now() - 7200000 },
       { id: "h3", url: "https://blog.example.com/p/post-quantum", title: "博文：后量子密码",
@@ -54,8 +57,15 @@
       o[k(4)] = { n: 2, ids: ["a2", "a3"] };
       o[k(30)] = 7; return o;
     })(),
-    clipkeep_prefs: { lang: UI_LANG },
+    clipkeep_prefs: {
+      lang: UI_LANG,
+      // 备份基线：桩给一个三天前的旧基线，自检面板那一行才会说出「几条还没进备份」，
+      // 而不是一句「还没备份过」——后者是默认状态，画在动图里等于没演示这个功能。
+      lastBackup: { at: Date.now() - 3 * 86400000, items: 5, highlights: 2 },
+    },
   };
+  // 桩扮演的「当前标签页」就是那篇文章：弹窗的页面重放自检会往这个 tab 发消息
+  const PAGE_URL = "https://en.wikipedia.org/wiki/Quantum_computing_(history)";
   const clone = (v) => JSON.parse(JSON.stringify(v));
   chrome = {
     storage: {
@@ -67,6 +77,10 @@
           return out;
         },
         async set(obj) { Object.assign(store, clone(obj)); },
+        // 真浏览器会报实际落盘字节数；桩按同一份数据的 UTF-8 长度回一个同口径的数，
+        // 否则演示帧上「存储占用」那一行永远写着「这个浏览器不报存储占用」。
+        async getBytesInUse() { return new TextEncoder().encode(JSON.stringify(store)).length; },
+        QUOTA_BYTES: 10485760,
       },
       onChanged: { addListener() {} },
     },
@@ -157,8 +171,26 @@
       getURL: (p) => p,
     },
     tabs: {
-      async query() { return [{ id: 1 }]; },
-      async sendMessage() { return { ok: true }; },
+      async query() { return [{ id: 1, url: PAGE_URL, active: true }]; },
+      // clipkeep:diag 是弹窗直接问页面「这些高亮还在不在」的自检消息：桩在这里替内容脚本
+      // 回一次，字段和 content.js 的 replayReport 一字不差。哪些能重放按种子里的句子实算——
+      // h1 那句真的在演示文章里，h4 那句不在，所以「存 2 / 标出 1 / 1 条定位不回」是数据的现状，
+      // 不是手写的好看数字；以后改种子，这一帧跟着变，不会变成一张骗人的截图。
+      async sendMessage(_id, msg) {
+        if (msg && msg.type === "clipkeep:diag") {
+          const article = [
+            "量子比特可以同时处于两种状态的叠加态，这意味着 n 个量子比特能够同时表示 2 的 n 次方个状态。",
+            "在算法层面，量子并行让我们有机会一次评估指数级多的输入分支，再通过干涉把错误答案相消、把正确答案放大。",
+            "Grover 搜索给出平方级加速，Shor 分解则在多项式时间内完成大整数分解，这也是后量子密码要提前换轨的原因。",
+            "退相干时间决定了能做多少层门，纠错码用多个物理比特拼一个逻辑比特，代价是门保真度必须高于阈值。",
+          ].join("");
+          const mine = store.clipkeep_highlights.filter((h) => h.url === PAGE_URL);
+          const missing = mine.filter((h) => article.indexOf(String(h.text)) < 0)
+            .map((h) => ({ id: String(h.id), text: String(h.text).slice(0, 60), len: String(h.text).length }));
+          return { ok: true, diag: { page: PAGE_URL, stored: mine.length, placed: mine.length - missing.length, missing } };
+        }
+        return { ok: true };
+      },
     },
   };
 })();

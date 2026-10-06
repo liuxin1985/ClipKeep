@@ -35,9 +35,10 @@ snap "w_sel"  "file://$HERE/web_shot.html?m=sel"  900 560
 snap "w_card" "file://$HERE/web_shot.html?m=card" 900 560
 snap "w_ov"   "file://$HERE/web_shot.html?m=ov"   900 560
 snap "w_anchor" "file://$HERE/web_shot.html?m=anchor" 900 620
-# 弹窗三视图 + 批量全选 + 类型筛选 + 键盘焦点 + 快捷键帮助 + 回收站明细 + 键盘打分 + 深色模式（380x600 就是真 popup 尺寸）
+# 弹窗三视图 + 批量全选 + 类型筛选 + 键盘焦点 + 快捷键帮助 + 回收站明细 + 键盘打分 + 深色模式
+# + 回顾按标签筛选 + 数据自检面板（380x600 就是真 popup 尺寸）
 # 每帧都得进 gen_demo_gif.py 的 FRAMES：一帧一次 Chrome 启动（约 50 秒），不用的模式别顺手加进来
-for f in clips batchall review reveal marks filter focus keys trash dark; do
+for f in clips batchall review reveal marks filter focus keys trash dark revfilter diag; do
   snap "p_$f" "file://$HERE/shot.html?f=$f" 380 600
 done
 # 英文界面那一帧：同一份 popup.html / popup.js，只是偏好把语言换成 en（?lang= 由桩接住）。

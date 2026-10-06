@@ -46,6 +46,9 @@ function makeBackend(opts) {
       id: "test",
       onInstalled: { addListener(fn) { installListeners.push(fn); } },
       onMessage: { addListener(fn) { listeners.push(fn); } },
+      // 真浏览器里弹窗随时能问自己的版本号；mock 缺了这个，诊断文件只能写空版本。
+      // 读真实清单，版本号就不会和 manifest.json 脱节。
+      getManifest: () => JSON.parse(fs.readFileSync(path.join(EXT, "manifest.json"), "utf8")),
       sendMessage(msg, cb) {
         let reply;
         const sendResponse = (r) => { reply = r; };
@@ -1117,8 +1120,15 @@ function mountContent(pageUrl, highlights, htmlBody, opts) {
     marks: () => [...w.document.querySelectorAll("mark.clipkeep-hl")],
     toastText: () => (w.document.getElementById("clipkeep-toast") || {}).textContent || "",
     bodyText: () => w.document.querySelector("article").textContent,
-    // 直接投递给本页 content script 的消息监听（净化阅读、快捷键秒存走这条路）
-    toContent: (msg) => new Promise((resolve) => lastListener()(msg, { tab: { id: 1 } }, resolve)),
+    // 直接投递给本页 content script 的消息监听（净化阅读、快捷键秒存走这条路）。
+    // 没人回包时 500ms 后按 undefined 收尾：新消息类型还没实现时，测试要干净地红，
+    // 不能让一个永不 resolve 的 promise 把整个进程吊死（连失败汇总都印不出来）。
+    toContent: (msg) => new Promise((resolve) => {
+      let done = false;
+      const wrap = (r) => { if (!done) { done = true; resolve(r); } };
+      lastListener()(msg, { tab: { id: 1 } }, wrap);
+      setTimeout(() => wrap(undefined), 500);
+    }),
   };
 }
 
@@ -4841,6 +4851,591 @@ async function testV111I18n() {
   }
 }
 
+/* ---------------- 3w. v1.12 回顾队列按标签 / 站点筛选 ---------------- */
+
+/**
+ * 点一个可能还不存在的元素：功能没做时，断言就该干干净净地红，
+ * 而不是抛异常把整个套件的后半截带走（那样连「哪几条没实现」都看不出来）。
+ */
+async function tap(p, el, what) {
+  if (!el) { ok(`点${what}`, false, `${what} 还没渲染出来`); return false; }
+  await p.click(el);
+  return true;
+}
+
+async function testV112ReviewFilter() {
+  console.log("\n[3f12] v1.12 回顾：只复习这一批（按标签 / 站点筛队列）");
+  const CJK = /[一-鿿]/;
+  const now = Date.now();
+  const mk = (id, tags, url) => ({
+    id, text: `正文-${id}`, note: `答案-${id}`, tags, url, title: `标题-${id}`,
+    createdAt: now, review: { box: 1, due: now - 1000, seen: 1 },
+  });
+  const open = async (over) => {
+    const p = await mountPopup({
+      clipkeep_items: [mk("q1", ["量子"], "http://q.dev/a"), mk("h1", ["历史"], "http://h.dev/a"), mk("q2", ["量子"], "http://q.dev/b")],
+      ...(over || {}),
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    return p;
+  };
+  const chips = (p) => [...p.qa("#revfilter .chip")];
+  const byText = (p, re) => chips(p).find((c) => re.test(c.textContent));
+  const cardId = (p) => ((p.q(".rev-card") || { dataset: {} }).dataset || {}).id || "";
+  const tapChip = async (p, re) => {
+    const c = byText(p, re);
+    if (!c) {
+      ok(`筛选条里有 ${re.source.replace(/[^0-9a-zA-Z一-鿿.]/g, "")} 这一项`, false,
+        chips(p).map((x) => x.textContent.trim()).join(" | ") || "筛选条还没出来");
+      return false;
+    }
+    await p.click(c);
+    return true;
+  };
+  const prog = (p) => ((p.q(".rev-progress") || {}).textContent || "").replace(/\s+/g, " ");
+  const revText = (p) => (p.$("review").textContent || "").replace(/\s+/g, " ");
+  const press = async (p, key) => {
+    p.w.document.dispatchEvent(new p.w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    await tick(20);
+  };
+
+  /* 1. 筛选条按「到期内容」生成， chip 上带条数 */
+  {
+    const p = await open();
+    ok("回顾视图里有筛选条", !!p.$("revfilter") && p.$("revfilter").hidden === false,
+      "没有 #revfilter 或它还是隐藏的");
+    const ts = chips(p).map((c) => c.textContent.trim());
+    ok("标签 chip 随数据生成", ts.includes("量子 2") && ts.includes("历史 1"), JSON.stringify(ts));
+    ok("站点 chip 随数据生成", ts.includes("q.dev 2") && ts.includes("h.dev 1"), JSON.stringify(ts));
+    eq("没筛选时队列是全库到期", cardId(p), "q1");
+  }
+
+  /* 2. 点标签：队列只剩这一批 */
+  {
+    const p = await open();
+    await tapChip(p, /量子/);
+    eq("筛标签后第一张来自这批", cardId(p), "q1");
+    ok("进度说的是这批的条数", /本组待回顾 2 条/.test(prog(p)), prog(p));
+    ok("选中的 chip 标成活动", chips(p).some((c) => c.classList.contains("active") && /量子/.test(c.textContent)),
+      chips(p).map((c) => c.className).join(" | "));
+  }
+
+  /* 3. 换标签 / 再点一次取消 */
+  {
+    const p = await open();
+    await tapChip(p, /历史/);
+    eq("筛历史只看历史那条", cardId(p), "h1");
+    await tapChip(p, /历史/);
+    ok("再点一次取消筛选，队列回到三条", /本组待回顾 3 条/.test(prog(p)), prog(p));
+  }
+
+  /* 4. 站点 chip 同样能筛 */
+  {
+    const p = await open();
+    await tapChip(p, /h\.dev/);
+    eq("按站点筛到那一个站", cardId(p), "h1");
+  }
+
+  /* 5. 标签 + 站点取交集；筛到空要给出路，不能只说「今日已完成」 */
+  {
+    const p = await open();
+    await tapChip(p, /量子/);
+    await tapChip(p, /h\.dev/);
+    ok("交集为空时不摆假卡片", !p.q(".rev-card"), cardId(p));
+    const txt = p.$("review").textContent.replace(/\s+/g, " ");
+    ok("空状态说清是筛空的", /这个筛选条件下没有要回顾的/.test(txt), txt.slice(0, 140));
+    ok("空状态不是那句「今日回顾已完成」", !/今日回顾已完成/.test(txt), txt.slice(0, 140));
+    const clear = p.q('#revfilter [data-act="rev-clear"]') || p.q('[data-act="rev-clear"]');
+    ok("给出清除筛选的出口", !!clear, "找不到 data-act=rev-clear 的按钮");
+    if (clear) {
+      await p.click(clear);
+      eq("清除后队列回来", cardId(p), "q1");
+    }
+  }
+
+  /* 6. 每日上限在筛完之后才截：剩余条数按这批算，不能拿全库数字说话 */
+  {
+    const p = await open({ clipkeep_prefs: { review: { cap: 1, mult: 1 } } });
+    await tapChip(p, /量子/);
+    ok("剩余条数按筛完的批算", /今日上限 1 条，剩余 1 条明天继续/.test(prog(p)), prog(p));
+  }
+
+  /* 7. 徽标守全库口径：筛选只是「先看这批」，不能让标签上的待回顾数变小 */
+  {
+    const p = await open();
+    await tapChip(p, /量子/);
+    eq("回顾徽标不受筛选影响", p.$("due").textContent, "3");
+  }
+
+  /* 8. 筛选不串台：收藏列表的条件与回顾的条件各管各的 */
+  {
+    const p = await open();
+    await tapChip(p, /量子/);
+    await p.click(p.q('.tab[data-view="clips"]'));
+    eq("列表仍是全部收藏", p.qa(".item").length, 3);
+    await p.click(p.q('.tab[data-view="review"]'));
+    ok("切回来时回顾筛选还在", chips(p).some((c) => c.classList.contains("active")),
+      "切一次视图就把筛选丢了，用户得重新点一遍");
+  }
+
+  /* 9. 键盘打分链在筛选下照常走，复习完这批就说这批没了 */
+  {
+    const p = await open();
+    await tapChip(p, /量子/);
+    await press(p, " ");
+    await press(p, "2");
+    eq("这批第一条按 2 升一盒", p.store.clipkeep_items.find((x) => x.id === "q1").review.box, 2);
+    eq("下一张仍是这批的", cardId(p), "q2");
+    await press(p, " ");
+    await press(p, "3");
+    const txt = p.$("review").textContent.replace(/\s+/g, " ");
+    ok("这批复习完后按筛选口径说明", /这个筛选条件下没有要回顾的/.test(txt), txt.slice(0, 140));
+    ok("另一批仍有到期，全库徽标跟着减", p.$("due").textContent === "1", p.$("due").textContent);
+  }
+
+  /* 10. chip 只由到期内容生成：这批复习完 chip 就消失，但选定的筛选要用户自己清 */
+  {
+    const p = await open();
+    await tapChip(p, /历史/);
+    await press(p, " ");
+    await press(p, "3"); // 简单：跳到 21 天后，历史这批今天不再到期
+    const ts = chips(p).map((c) => c.textContent.trim());
+    ok("没有到期的标签不再列 chip", !ts.some((t) => /历史/.test(t)), JSON.stringify(ts));
+    // 队列不悄悄换成别的内容：那等于替用户改了主意，还会让他找不到回到全库的入口
+    ok("这批复习完按筛选口径停下来说明", /这个筛选条件下没有要回顾的/.test(revText(p)), revText(p).slice(0, 140));
+    const clear = p.q('[data-act="rev-clear"]');
+    ok("说明旁边留着「清除筛选」", !!clear, "没有回全库的入口，用户被筛死在这屏");
+    if (clear) {
+      await p.click(clear);
+      ok("清除后回到全库的到期内容", /本组待回顾 2 条/.test(prog(p)), prog(p));
+    }
+  }
+
+  /* 11. 到期内容只有一个标签、一个站点时不铺筛选条（没得筛就别摆一排按钮） */
+  {
+    const p = await open({
+      clipkeep_items: [mk("s1", ["量子"], "http://q.dev/a"), mk("s2", ["量子"], "http://q.dev/b")],
+    });
+    ok("单标签单站点时收起筛选条", !p.$("revfilter") || p.$("revfilter").hidden !== false,
+      chips(p).map((c) => c.textContent.trim()).join(" | "));
+  }
+
+  /* 12. 英文界面：筛选条、进度、空状态都不留中文 */
+  {
+    const p = await mountPopup({
+      clipkeep_prefs: { lang: "en" },
+      clipkeep_items: [
+        { id: "e1", text: "Alpha qubit", note: "a", tags: ["quantum"], url: "http://q.dev/a", createdAt: now, review: { box: 1, due: now - 1000, seen: 1 } },
+        { id: "e2", text: "Roman roads", note: "b", tags: ["history"], url: "http://h.dev/a", createdAt: now, review: { box: 1, due: now - 900, seen: 1 } },
+      ],
+    }, { uiLanguage: "en-US" });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(20);
+    ok("英文界面也有筛选条", !!p.$("revfilter") && p.$("revfilter").hidden === false);
+    await tapChip(p, /quantum/);
+    await tapChip(p, /h\.dev/);
+    const txt = (p.$("review").textContent + " " + (p.$("revfilter") || { textContent: "" }).textContent).replace(/\s+/g, " ");
+    ok("筛到空的提示是英文", !CJK.test(txt), txt.slice(0, 160));
+    const clear = p.q('[data-act="rev-clear"]');
+    if (clear) {
+      await p.click(clear);
+      ok("清除后进度也是英文", !CJK.test(prog(p)), prog(p));
+    }
+  }
+}
+
+/* ---------------- 3x. v1.12 数据自检面板 ---------------- */
+
+async function testV112Diag() {
+  console.log("\n[3g12] v1.12 数据自检：一屏看清库里有什么、哪里对不上");
+  const CJK = /[一-鿿]/;
+  const now = Date.now();
+  const MIN = 60000;
+
+  /* --- 页面端：重放结果得能被问出来 --- */
+
+  const pageUrl = "http://localhost/diag1";
+  const plainAt = (id, text) => ({ id, url: pageUrl, text, color: "yellow", note: "", createdAt: now });
+
+  {
+    const text = "量子比特可以同时处于两种状态";
+    const c = mountContent(pageUrl, [
+      plainAt("ok1", text),
+      plainAt("gone", "这段字在页面上已经被作者删掉了"),
+      { id: "other", url: "http://localhost/other-page", text: "别页面的高亮", color: "yellow", note: "", createdAt: now },
+    ], `<p>${text}，这是并行性的来源。</p>`);
+    await tick(30);
+    ok("本页标出一条", c.marks().some((m) => m.dataset.hlid === "ok1"));
+    const r = await c.toContent({ type: "clipkeep:diag" });
+    ok("自检消息有回包", !!(r && r.ok && r.diag), JSON.stringify(r));
+    if (r && r.diag) {
+      eq("只算本页的记录", r.diag.stored, 2);
+      eq("标出来的条数", r.diag.placed, 1);
+      ok("定位不回的那条列出来", r.diag.missing.length === 1 && r.diag.missing[0].id === "gone",
+        JSON.stringify(r.diag.missing));
+    }
+  }
+
+  /* 预览要短：诊断结果会被列进面板和导出文件，不能把整篇正文搬过来 */
+  {
+    const long = "很长的一句".repeat(40); // 200 字
+    const c = mountContent("http://localhost/diag2", [
+      { id: "big", url: "http://localhost/diag2", text: long, color: "yellow", note: "", createdAt: now },
+    ], `<p>页面上没有那句话。</p>`);
+    await tick(30);
+    const r = await c.toContent({ type: "clipkeep:diag" });
+    const p = r && r.diag && r.diag.missing[0] ? r.diag.missing[0] : {};
+    ok("缺字预览有长度上限", p.text && p.text.length > 0 && p.text.length <= 60, `${(p.text || "").length} 字`);
+    // 预览截短了，长度得按原文报：诊断要看的是「丢了多大一块」，不是「预览留了多少字」
+    ok("长度按原文报", p.len === long.length, JSON.stringify([p.len, long.length]));
+  }
+
+  /* --- 弹窗端：设置里一屏看完 --- */
+
+  const item = (id, extra) => ({
+    id, text: `正文-${id}`, note: "", tags: [], url: "http://x/1", title: `标题-${id}`,
+    createdAt: now, ...(extra || {}),
+  });
+  const withDiag = async (seed, pageDiag) => {
+    const p = await mountPopup(seed);
+    p.chrome.tabs.sendMessage = async () => pageDiag;
+    await p.click(p.$("btn-settings"));
+    await tick(40);
+    return p;
+  };
+  const diagText = (p) => ((p.$("diag") || {}).textContent || "").replace(/\s+/g, " ");
+
+  /* 1. 打开设置就自动自检：数量一眼可见 */
+  {
+    const p = await withDiag({
+      clipkeep_items: [item("d1"), item("d2"), item("d3")],
+      clipkeep_highlights: [{ id: "m1", url: "http://x/1", text: "一句", color: "yellow", note: "", createdAt: now }],
+    }, { ok: true, diag: { stored: 1, placed: 1, missing: [] } });
+    ok("设置里有数据自检区块", !!p.$("diag") && p.$("diag").hidden !== true, "没有 #diag 或它是隐藏的");
+    const txt = diagText(p);
+    ok("报出收藏条数", /收藏 3 条/.test(txt), txt.slice(0, 160));
+    ok("报出高亮条数", /高亮 1 条/.test(txt), txt.slice(0, 160));
+    ok("回收站是空的就直说", /回收站是空的/.test(txt), txt.slice(0, 160));
+  }
+
+  /* 2. 存储大小：自己算的字节一定有；浏览器不报占用时不能编一个 0 出来 */
+  {
+    const p = await withDiag({ clipkeep_items: [item("s1", { text: "甲".repeat(500) })] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    const txt = diagText(p);
+    ok("报出数据自身大小", /\d+(\.\d)? KB/.test(txt), txt.slice(0, 200));
+    ok("浏览器不报占用时如实说明", /这个浏览器不报存储占用/.test(txt), txt.slice(0, 200));
+
+    const q = await withDiag({ clipkeep_items: [item("s2")] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    q.chrome.storage.local.getBytesInUse = async () => 12345;
+    await tap(q, q.$("btn-diag"), "重新自检");
+    await tick(30);
+    ok("能报占用时给出浏览器口径", /12 KB/.test(diagText(q)), diagText(q).slice(0, 200));
+  }
+
+  /* 3. 被字数上限砍短的收藏：列标题和长度，不搬正文 */
+  {
+    const p = await withDiag({
+      clipkeep_items: [item("t1", { truncated: true }), item("t2"), item("t3", { truncated: true })],
+    }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    const txt = diagText(p);
+    ok("点出被砍短的条数", /正文被.{0,10}20000.{0,6}砍短 2 条/.test(txt), txt.slice(0, 220));
+    ok("列出是哪几条", /标题-t1/.test(txt) && /标题-t3/.test(txt), txt.slice(0, 220));
+    const q = await withDiag({ clipkeep_items: [item("t9")] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    ok("没有砍短的就明说没有", /没有正文被砍短的收藏/.test(diagText(q)), diagText(q).slice(0, 220));
+  }
+
+  /* 4. 回收站：最早一条多久后清掉 */
+  {
+    const p = await withDiag({
+      clipkeep_items: [],
+      clipkeep_trash: [
+        { kind: "clip", tid: "g1", deletedAt: now - 8 * MIN, item: item("gone1") },
+        { kind: "clip", tid: "g2", deletedAt: now - 2 * MIN, item: item("gone2") },
+      ],
+      clipkeep_prefs: { trash: { mins: 10 } },
+    }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    const txt = diagText(p);
+    ok("回收站条数与最早过期时间", /回收站 2 条/.test(txt) && /约 2 分/.test(txt), txt.slice(0, 220));
+  }
+
+  /* 5. 当前页面重放：存了几条、标出几条、哪条回不来 */
+  {
+    const p = await withDiag({ clipkeep_items: [item("p1")] },
+      { ok: true, diag: { stored: 3, placed: 1, missing: [{ id: "z9", text: "定位不回的那一句" }] } });
+    const txt = diagText(p);
+    ok("页面重放三档都说清", /存 3 条/.test(txt) && /标出 1 条/.test(txt) && /1 条定位不回/.test(txt), txt.slice(0, 220));
+    ok("点名回不来的那条", /定位不回的那一句/.test(txt), txt.slice(0, 220));
+
+    const q = await withDiag({ clipkeep_items: [item("p2")] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    ok("这页没高亮就直说", /这个页面没有高亮记录/.test(diagText(q)), diagText(q).slice(0, 220));
+  }
+
+  /* 6. 页面打不通（浏览器自带页、扩展刚更新、脚本没注入）要如实说，不能留上一屏的数字 */
+  {
+    const p = await withDiag({ clipkeep_items: [item("n1")] }, undefined);
+    const txt = diagText(p);
+    ok("打不通时说明原因", /这个页面打不通/.test(txt), txt.slice(0, 220));
+    ok("不摆出假的页面数字", !/存 \d+ 条/.test(txt), txt.slice(0, 220));
+
+    const c = mountContent("http://localhost/diag3", [], `<p>没有高亮的页面</p>`);
+    await tick(30);
+    c.store.__failNextGet = true;
+    const r = await c.toContent({ type: "clipkeep:diag" });
+    ok("存储读不到时回包报错而不是回空表", !(r && r.ok), JSON.stringify(r));
+  }
+
+  /* 7. 备份基线：点过备份就记住当时的条数，自检说清还有多少没进备份 */
+  {
+    const p = await mountPopup({ clipkeep_items: [item("b1"), item("b2")] });
+    p.chrome.tabs.sendMessage = async () => ({ ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    await p.click(p.$("btn-backup"));
+    await tick(30);
+    ok("备份把基线写进偏好", !!(p.store.clipkeep_prefs.lastBackup),
+      JSON.stringify(p.store.clipkeep_prefs));
+    await p.be.send({ type: "clipkeep:add", payload: { text: "备份之后又存的一条", url: "http://x/9", title: "新的一条" } });
+    await p.click(p.$("btn-settings"));
+    await tick(40);
+    ok("说出还没进备份的条数", /1 条还没进备份/.test(diagText(p)), diagText(p).slice(0, 220));
+
+    const q = await withDiag({ clipkeep_items: [item("b3")] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    ok("没备份过时直说", /还没备份过/.test(diagText(q)), diagText(q).slice(0, 220));
+  }
+
+  /* 8. 重新自检按存储现算：弹窗里的数据是旧的，面板不能跟着旧 */
+  {
+    const p = await withDiag({ clipkeep_items: [item("r1")] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    ok("初始一条", /收藏 1 条/.test(diagText(p)), diagText(p).slice(0, 200));
+    await p.be.send({ type: "clipkeep:add", payload: { text: "别处新存的", url: "http://x/8", title: "别处" } });
+    await p.be.send({ type: "clipkeep:add", payload: { text: "还有这条", url: "http://x/7", title: "还有" } });
+    await tap(p, p.$("btn-diag"), "重新自检");
+    await tick(30);
+    ok("重新自检读到三条", /收藏 3 条/.test(diagText(p)), diagText(p).slice(0, 200));
+  }
+
+  /* 9. 一键导出诊断 JSON：结构可解析，且只报元数据不报正文 */
+  {
+    const SECRET = "这段正文是用户私藏的，绝不进诊断文件";
+    const p = await withDiag({
+      clipkeep_items: [item("x1", { text: SECRET, note: SECRET, truncated: true }), item("x2")],
+      clipkeep_highlights: [{ id: "h1", url: "http://x/1", text: "一句高亮", color: "yellow", note: "", createdAt: now }],
+    }, { ok: true, diag: { stored: 2, placed: 1, missing: [{ id: "z9", text: "定位不回的那一句" }] } });
+    await tap(p, p.$("btn-diag-export"), "导出诊断");
+    await tick(40);
+    const raw = p.getDownloaded() || "";
+    ok("导出能拿到内容", !!raw, "download 没有被调用");
+    let j = null;
+    try { j = JSON.parse(raw); } catch (_) { /* 下面那条断言会报出来 */ }
+    ok("诊断文件是合法 JSON", !!j, raw.slice(0, 120));
+    if (j) {
+      eq("标明这是诊断", j.kind, "diagnostics");
+      eq("带上应用名", j.app, "ClipKeep");
+      ok("计数齐全", j.counts && j.counts.items === 2 && j.counts.highlights === 1, JSON.stringify(j.counts));
+      ok("截断条目报长度", Array.isArray(j.truncated) && j.truncated.length === 1
+        && j.truncated[0].id === "x1" && typeof j.truncated[0].len === "number",
+        JSON.stringify(j.truncated));
+      ok("页面重放的缺口带上", j.page && j.page.missing && j.page.missing[0].id === "z9", JSON.stringify(j.page));
+      ok("诊断文件里不含正文与备注全文", !raw.includes(SECRET), "正文被搬进诊断文件了");
+      // 面板上要认得出是哪一条回不来了，可导出文件是准备贴到 issue 里的：
+      // 那 60 字预览是用户的高亮原文，留在文件里就等于把读书笔记一起发出去
+      ok("导出只留缺口条目编号，不留高亮原文", !raw.includes("定位不回的那一句"),
+        JSON.stringify(j.page && j.page.missing));
+      ok("缺口条目仍报得出长度", !!(j.page && j.page.missing && typeof j.page.missing[0].len === "number"),
+        JSON.stringify(j.page && j.page.missing));
+      ok("带上版本号与时间", !!j.version && !!j.generatedAt, JSON.stringify([j.version, j.generatedAt]));
+    }
+  }
+
+  /* 10. 英文界面：自检面板一句中文都不留 */
+  {
+    const p = await mountPopup({
+      clipkeep_prefs: { lang: "en" },
+      clipkeep_items: [{ id: "g1", text: "Alpha", note: "", tags: [], url: "http://x/1", title: "Src", createdAt: now, truncated: true }],
+    }, { uiLanguage: "en-US" });
+    p.chrome.tabs.sendMessage = async () => ({ ok: true, diag: { stored: 1, placed: 0, missing: [{ id: "z", text: "gone text" }] } });
+    await p.click(p.$("btn-settings"));
+    await tick(40);
+    const txt = diagText(p);
+    ok("英文界面有自检结果", !!txt, "面板是空的");
+    ok("自检面板没有中文", !CJK.test(txt), txt.slice(0, 200));
+    const btns = [p.$("btn-diag"), p.$("btn-diag-export")].map((b) => (b || { textContent: "按钮不存在" }).textContent).join(" | ");
+    ok("设置里那两个按钮也是英文", !CJK.test(btns), btns);
+  }
+
+  /* 11. 语言换了，已经画出来的自检面板要跟着换：
+          语言选择器就挂在设置里，用户改完语言抬眼就是这块面板，留半屏旧语言最扎眼 */
+  {
+    const p = await withDiag({ clipkeep_items: [item("l1")] }, { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    ok("中文界面先有自检结果", /收藏 1 条/.test(diagText(p)), diagText(p).slice(0, 160));
+    const sel = p.$("pref-lang");
+    sel.value = "en";
+    await p.fire(sel, "change");
+    await tick(30);
+    ok("换语言后自检面板不留旧语言", !CJK.test(diagText(p)), diagText(p).slice(0, 200));
+  }
+
+  /* 12. 样式：弹窗只有 600px 高，自检面板是接在设置最后一块——设置区不能整块被裁掉。
+          真浏览器抓帧实测：flex 列里的 .settings 没有 min-height:0，自动最小尺寸等于内容高度，
+          压不下去就被 body 的 overflow:hidden 切掉，「今日到期 / 上次备份」两行在真弹窗里根本滚不到。 */
+  {
+    const css = src("popup.css");
+    ok("设置区装不下时自己滚", /\.settings\s*\{[^}]*overflow-y:\s*auto/.test(css),
+      "→ 弹窗定高 600px，面板最后一行永远看不见");
+    ok("设置区可以被压到可视高度内", /\.settings\s*\{[^}]*min-height:\s*0/.test(css),
+      "→ flex 项的默认最小尺寸是内容高度，overflow:hidden 直接把它裁掉");
+  }
+}
+
+
+/* ---------------- v1.12 审计：自检面板与回顾筛选的边界 ---------------- */
+
+async function testV112Audit() {
+  console.log("\n[3h12] v1.12 审计：读不到的东西不能说成读过，用户的数据不能拼进 HTML");
+  const CJK = /[\u4e00-\u9fff]/;
+  const now = Date.now();
+  const MIN = 60000;
+  const item = (id, extra) => ({
+    id, text: `正文-${id}`, note: "", tags: [], url: "http://x/1", title: `标题-${id}`,
+    createdAt: now, ...(extra || {}),
+  });
+  const due1 = (i) => ({ box: 1, due: now - 1000 - i, seen: 1 });
+  const openDiag = async (seed, pageDiag) => {
+    const p = await mountPopup(seed);
+    p.chrome.tabs.sendMessage = async () =>
+      (pageDiag || { ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    await p.click(p.$("btn-settings"));
+    await tick(40);
+    return p;
+  };
+  const diagText = (p) => ((p.$("diag") || {}).textContent || "").replace(/\s+/g, " ");
+
+  /* 1. 列表的类型 chip 走没走文案层（chip 是 v1.8 做的，文案层是 v1.11 才补的） */
+  {
+    const p = await mountPopup({
+      clipkeep_items: [
+        item("k1"),
+        item("k2", { kind: "image", image: "http://x/a.png" }),
+        item("k3", { kind: "link", link: "http://x/b" }),
+      ],
+    }, { uiLanguage: "en-US" });
+    await tick(20);
+    const txt = (p.$("filterbar") || { textContent: "" }).textContent;
+    ok("英文界面的类型 chip 也是英文", !!txt && !CJK.test(txt), txt);
+  }
+
+  /* 2. 备份基线要扛得住之后改设置：savePrefs 是整包写回 prefs 的 */
+  {
+    const p = await openDiag({ clipkeep_items: [item("a1"), item("a2")] });
+    await p.click(p.$("btn-backup"));
+    await tick(30);
+    p.$("set-cap").value = "5";
+    await p.fire(p.$("set-cap"), "change");
+    await tick(30);
+    ok("改设置不会把备份基线冲掉", !!((p.store.clipkeep_prefs || {}).lastBackup),
+      JSON.stringify(p.store.clipkeep_prefs));
+    await p.click(p.$("btn-settings")); // 关掉
+    await p.click(p.$("btn-settings")); // 重开，重新自检
+    await tick(40);
+    ok("重开设置仍报得出上次备份", /上次备份/.test(diagText(p)), diagText(p).slice(0, 220));
+  }
+
+  /* 3. 基线是外来数据（手改过的存储、旧版本残留）：没有时间的「备份」不算备份 */
+  {
+    const p = await openDiag({
+      clipkeep_items: [item("z1")],
+      clipkeep_prefs: { lastBackup: {} },
+    });
+    ok("没有时间戳的基线不摆 1970 年", /还没备份过/.test(diagText(p)), diagText(p).slice(0, 220));
+  }
+
+  /* 4. 标签是用户自己打的，带引号也不能变成 HTML 属性；点了还得筛得动 */
+  {
+    const weird = 'a" onclick="boom';
+    const p = await mountPopup({
+      clipkeep_items: [
+        item("w1", { tags: [weird], review: due1(1) }),
+        item("w2", { tags: ["正常"], review: due1(2) }),
+      ],
+    });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(30);
+    const chip = p.qa("#revfilter .chip").find((c) => (c.getAttribute("data-rtag") || "").startsWith('a"'));
+    ok("怪标签还在 chip 里", !!chip, p.qa("#revfilter .chip").map((c) => c.outerHTML).join(" | "));
+    ok("标签没被拼成事件属性", !p.q("#revfilter [onclick]"), "用户打的标签变成了 onclick");
+    if (chip) {
+      await p.click(chip);
+      ok("点了照样筛得动", /本组待回顾 1 条/.test(((p.q(".rev-progress") || {}).textContent || "")), 
+        ((p.q(".rev-progress") || {}).textContent || "").slice(0, 120));
+    }
+  }
+
+  /* 5. 页面回包的预览同样是用户内容：面板只显示文本，不认标签 */
+  {
+    const p = await openDiag({ clipkeep_items: [item("e1")] },
+      { ok: true, diag: { stored: 2, placed: 1, missing: [{ id: "m", text: '<img src=x onerror=alert(1)>', len: 25 }] } });
+    ok("预览不注入元素", !p.q("#diag img"), p.$("diag").innerHTML.slice(0, 200));
+    ok("预览照样看得清", /onerror/.test(diagText(p)), diagText(p).slice(0, 220));
+  }
+
+  /* 6. 浏览器报占用这事本身可能坏：抛异常、报负数，都得退回「不报占用」而不是把面板整体弄没 */
+  {
+    const a = await mountPopup({ clipkeep_items: [item("g1")] });
+    a.chrome.tabs.sendMessage = async () => ({ ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    a.chrome.storage.local.getBytesInUse = async () => { throw new Error("QuotaUnusable"); };
+    await a.click(a.$("btn-settings"));
+    await tick(40);
+    ok("占用接口报错时面板照常", /收藏 1 条/.test(diagText(a)) && /这个浏览器不报存储占用/.test(diagText(a)), diagText(a).slice(0, 220));
+
+    const b = await mountPopup({ clipkeep_items: [item("g2")] });
+    b.chrome.tabs.sendMessage = async () => ({ ok: true, diag: { stored: 0, placed: 0, missing: [] } });
+    b.chrome.storage.local.getBytesInUse = async () => -5;
+    await b.click(b.$("btn-settings"));
+    await tick(40);
+    ok("报出负数也当没这个接口", /这个浏览器不报存储占用/.test(diagText(b)), diagText(b).slice(0, 220));
+  }
+
+  /* 7. 存储读不到：说读不到，别把上一屏的数字留在原地当现状 */
+  {
+    const p = await openDiag({ clipkeep_items: [item("f1"), item("f2"), item("f3")] });
+    ok("先有一份正常结果", /收藏 3 条/.test(diagText(p)), diagText(p).slice(0, 220));
+    p.store.__failNextGet = true;
+    await p.click(p.$("btn-diag"));
+    await tick(40);
+    const txt = diagText(p);
+    ok("读不到就明说读不到", /存储读不到/.test(txt), txt.slice(0, 220));
+    ok("不留上一屏的假现状", !/收藏 3 条/.test(txt), txt.slice(0, 220));
+  }
+
+  /* 8. 回收站里已经过期的条目不该被算成「还能撤销」 */
+  {
+    const p = await openDiag({
+      clipkeep_items: [],
+      clipkeep_trash: [{ kind: "clip", tid: "t1", deletedAt: now - 30 * MIN, item: item("old") }],
+      clipkeep_prefs: { trash: { mins: 10 } },
+    });
+    ok("过期条目不再计数", /回收站是空的/.test(diagText(p)), diagText(p).slice(0, 220));
+  }
+
+  /* 9. 站点很多时 chip 有上限，剩下的说清楚还有几个 */
+  {
+    const many = Array.from({ length: 14 }, (_, i) =>
+      item(`s${i}`, { url: `http://site${i}.dev/${i}`, tags: ["甲", i % 2 ? "乙" : "丙"], review: due1(i) }));
+    const p = await mountPopup({ clipkeep_items: many });
+    await p.click(p.q('.tab[data-view="review"]'));
+    await tick(30);
+    const bar = (p.$("revfilter") || { textContent: "" });
+    eq("站点 chip 收到上限", p.qa("#revfilter .chip.site").length, 12);
+    ok("多出来的站点有交代", /\+2 站/.test(bar.textContent), bar.textContent.slice(0, 200));
+  }
+
+  /* 10. 自检还没跑完就点导出：不出文件，并说清在等什么 */
+  {
+    const p = await mountPopup({ clipkeep_items: [item("n9")] });
+    await p.fire(p.$("btn-diag-export"), "click");
+    await tick(20);
+    ok("没跑自检时不导出", !p.getDownloaded(), "什么都没自检就发了一个诊断文件");
+    ok("提示说清在等什么", /自检/.test(p.$("toast").textContent), p.$("toast").textContent);
+  }
+}
 
 /* ---------------- 4. 清单一致性 ---------------- */
 
@@ -4890,12 +5485,22 @@ async function testManifests() {
     ok(`清单引用 ${f} 存在`, fs.existsSync(path.join(EXT, f)));
   }
 
-  /* 前端发出的每种消息，后台都得有对应处理 */
+  /* 前端发出的每种消息，接收方都得认识。
+     弹窗也可以用 tabs.sendMessage 绕过后台直接问本页脚本，这类消息后台里当然找不到，
+     但页面侧必须有对应的 msg.type 分支——否则同样是没人接手的死消息。 */
   const bg = src("background.js");
-  const front = src("popup.js") + src("content.js");
+  const content = src("content.js");
+  const front = src("popup.js") + content;
+  const pageDirect = ["clipkeep:diag"]; // popup → 当前页面，不经过后台
   const frontTypes = new Set(typesIn(front));
   const bgTypes = new Set(typesIn(bg));
-  for (const t of frontTypes) ok(`后台认识 ${t}`, bgTypes.has(t), "→ 消息会返回 unknown");
+  for (const t of frontTypes) {
+    if (pageDirect.includes(t)) {
+      ok(`页面侧认识 ${t}`, content.includes(`"${t}"`) && content.includes("msg.type"), "→ 弹窗直接发给页面，可页面没接手");
+      continue;
+    }
+    ok(`后台认识 ${t}`, bgTypes.has(t), "→ 消息会返回 unknown");
+  }
   for (const t of bgTypes) ok(`前端或页面用到 ${t}`, frontTypes.has(t), "→ 死代码 / 拼错的历史消息");
 
   /* 演示抓帧管线：清单要装的脚本一个都不能漏，界面语言必须钉住 */
@@ -4920,6 +5525,27 @@ async function testManifests() {
     ok("抓帧列表里有一帧英文界面", /lang=en/.test(cap), "→ 英文用户看不到自己那套界面");
     const gif = fs.readFileSync(path.join(ROOT, "docs", "gen_demo_gif.py"), "utf8");
     ok("动图合成把英文帧也排进去", /p_en/.test(gif), "→ 白抓一帧");
+    /* 抓帧清单和合成清单必须互相咬合。一帧 = 一次 Chrome 启动（约 50 秒），
+       加了 snap 忘了进 FRAMES 就是白等一分钟；FRAMES 里留了没人抓的帧，
+       gen_demo_gif.py 会在 load() 里硬退出，动图根本出不了。 */
+    const snapped = new Set([
+      ...[...cap.matchAll(/snap\s+"([\w-]+)"/g)].map((m) => m[1]),
+      ...[...cap.matchAll(/for f in ([\w ]+);/g)].flatMap((m) => m[1].split(/\s+/).filter(Boolean).map((f) => "p_" + f)),
+    ]);
+    const inGif = new Set([...gif.matchAll(/^\s*\("(?:p_|w_)[\w-]*"/gm)].map((m) => m[0].replace(/[\s("]/g, "").replace(/"$/, "")));
+    for (const name of [...snapped].sort()) {
+      ok(`抓的 ${name} 进了动图`, inGif.has(name), `→ capture.sh 会抓 ${name}.png，gen_demo_gif.py 却没用它（白等一次 Chrome 启动）`);
+    }
+    for (const name of [...inGif].sort()) {
+      ok(`${name} 有人抓`, snapped.has(name), `→ 动图要 ${name}，capture.sh 不产这张，合成时直接退出`);
+    }
+    // 说明文字开头的带圈序号：①–⑳ 是连续码位，插一帧忘了改号就会出现两个 ⑫ 或跳号
+    {
+      const marks = [...gif.matchAll(/^\s*\("[\w-]+",\s*"[^"]*",\s*"([\u2460-\u24ff])/gm)].map((m) => m[1]);
+      eq("动图序号条数和帧数对得上", marks.length, inGif.size);
+      eq("动图说明从 ① 起连续编号", marks.join(""),
+        marks.map((_, i) => String.fromCharCode(0x2460 + i)).join(""));
+    }
     /* 说明文字里的带圈序号：主字体 Hiragino Sans GB 只画到 ⑩，⑪ 起是豆腐块——
        已发布的 v1.9~v1.10 动图里 ⑪⑫⑬⑭ 四帧的序号就是四个方框，出图时没人放大看。 */
     ok("动图说明有缺字兜底字体", /FONT_FALLBACK\s*=/.test(gif), "→ ⑪ 之后的序号画成方框");
@@ -4943,7 +5569,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testV112ReviewFilter, testV112Diag, testV112Audit, testManifests];
   for (const s of suites) {
     try {
       await s();
