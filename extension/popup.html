@@ -14,111 +14,120 @@
         <span class="count" id="count">0</span>
       </div>
       <div class="header-actions">
-        <button id="btn-keys" class="icon-btn" title="键盘快捷键（?）">?</button>
-        <button id="btn-reader" class="icon-btn" title="净化阅读当前页">📖</button>
-        <button id="btn-settings" class="icon-btn" title="设置">⚙</button>
-        <button id="btn-theme" class="icon-btn" title="切换深色模式">🌙</button>
-        <button id="btn-export" class="icon-btn" title="导出全部为 Markdown">⬇</button>
+        <button id="btn-keys" class="icon-btn" data-i18n-title="键盘快捷键（?）" title="键盘快捷键（?）">?</button>
+        <button id="btn-reader" class="icon-btn" data-i18n-title="净化阅读当前页" title="净化阅读当前页">📖</button>
+        <button id="btn-settings" class="icon-btn" data-i18n-title="设置" title="设置">⚙</button>
+        <button id="btn-theme" class="icon-btn" data-i18n-title="切换深色模式" title="切换深色模式">🌙</button>
+        <button id="btn-export" class="icon-btn" data-i18n-title="导出全部为 Markdown" title="导出全部为 Markdown">⬇</button>
       </div>
     </header>
 
     <nav class="tabs">
-      <button class="tab active" data-view="clips">📌 收藏</button>
-      <button class="tab" data-view="marks">🖍 高亮 <span class="due" id="mark-count" hidden></span></button>
-      <button class="tab" data-view="review">🔁 回顾 <span class="due" id="due" hidden></span></button>
+      <button class="tab active" data-view="clips"><span data-i18n="📌 收藏">📌 收藏</span></button>
+      <button class="tab" data-view="marks"><span data-i18n="🖍 高亮">🖍 高亮</span> <span class="due" id="mark-count" hidden></span></button>
+      <button class="tab" data-view="review"><span data-i18n="🔁 回顾">🔁 回顾</span> <span class="due" id="due" hidden></span></button>
     </nav>
 
     <!-- 搜索工具条（收藏 / 高亮视图共用） -->
     <section class="toolbar" id="toolbar">
-      <input id="search" type="search" placeholder="搜索收藏内容…" />
-      <select id="sort" title="排序">
-        <option value="new">最新优先</option>
-        <option value="old">最早优先</option>
+      <input id="search" type="search" data-i18n-placeholder="搜索收藏内容…" placeholder="搜索收藏内容…" />
+      <select id="sort" data-i18n-title="排序" title="排序">
+        <option value="new" data-i18n="最新优先">最新优先</option>
+        <option value="old" data-i18n="最早优先">最早优先</option>
       </select>
-      <button id="btn-tags" class="icon-btn" title="管理标签">🏷</button>
-      <button id="btn-hl-export" class="icon-btn" title="导出高亮批注为 Markdown" hidden>⬇</button>
+      <button id="btn-tags" class="icon-btn" data-i18n-title="管理标签" title="管理标签">🏷</button>
+      <button id="btn-hl-export" class="icon-btn" data-i18n-title="导出高亮批注为 Markdown" title="导出高亮批注为 Markdown" hidden>⬇</button>
     </section>
 
     <!-- 批量操作条（勾选收藏后出现，只对当前视图里的选中项生效） -->
     <section class="batchbar" id="batchbar" hidden>
-      <span class="batch-text" id="batch-text">已选 0 条</span>
-      <button id="btn-batch-all" class="mini-btn">全选</button>
-      <button id="btn-batch-tag" class="mini-btn">加标签</button>
-      <button id="btn-batch-export" class="mini-btn">导出</button>
-      <button id="btn-batch-del" class="mini-btn danger">删除</button>
-      <button id="btn-batch-cancel" class="mini-btn">取消</button>
+      <span class="batch-text" id="batch-text" data-i18n="已选 0 条">已选 0 条</span>
+      <button id="btn-batch-all" class="mini-btn" data-i18n="全选">全选</button>
+      <button id="btn-batch-tag" class="mini-btn" data-i18n="加标签">加标签</button>
+      <button id="btn-batch-export" class="mini-btn" data-i18n="导出">导出</button>
+      <button id="btn-batch-del" class="mini-btn danger" data-i18n="删除">删除</button>
+      <button id="btn-batch-cancel" class="mini-btn" data-i18n="取消">取消</button>
     </section>
 
     <!-- 快捷键帮助：只列真能用的键，? 或右上角按钮开关 -->
     <section class="keys-help" id="keys-help" hidden>
       <div class="kh-card">
         <div class="kh-head">
-          <h4>键盘快捷键</h4>
-          <button class="mini-btn" data-act="close">关闭</button>
+          <h4 data-i18n="键盘快捷键">键盘快捷键</h4>
+          <button class="mini-btn" data-act="close" data-i18n="关闭">关闭</button>
         </div>
         <ul class="kh-list">
-          <li><span class="kh-keys"><kbd>↑</kbd><kbd>↓</kbd></span><span class="kh-desc">在收藏列表里移动焦点</span></li>
-          <li><span class="kh-keys"><kbd>x</kbd></span><span class="kh-desc">勾选 / 取消勾选焦点那条，配合批量操作</span></li>
-          <li><span class="kh-keys"><kbd>Enter</kbd></span><span class="kh-desc">展开 / 收起焦点那条的全文</span></li>
-          <li><span class="kh-keys"><kbd>空格</kbd></span><span class="kh-desc">回顾时显示答案</span></li>
-          <li><span class="kh-keys"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></span><span class="kh-desc">回顾打分：忘记 / 记得 / 简单（要先看答案）</span></li>
-          <li><span class="kh-keys"><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd></span><span class="kh-desc">网页上把选区一秒存进 ClipKeep</span></li>
-          <li><span class="kh-keys"><kbd>?</kbd><kbd>Esc</kbd></span><span class="kh-desc">打开 / 关闭这份快捷键说明</span></li>
+          <li><span class="kh-keys"><kbd>↑</kbd><kbd>↓</kbd></span><span class="kh-desc" data-i18n="在收藏列表里移动焦点">在收藏列表里移动焦点</span></li>
+          <li><span class="kh-keys"><kbd>x</kbd></span><span class="kh-desc" data-i18n="勾选 / 取消勾选焦点那条，配合批量操作">勾选 / 取消勾选焦点那条，配合批量操作</span></li>
+          <li><span class="kh-keys"><kbd>Enter</kbd></span><span class="kh-desc" data-i18n="展开 / 收起焦点那条的全文">展开 / 收起焦点那条的全文</span></li>
+          <li><span class="kh-keys"><kbd data-i18n="空格">空格</kbd></span><span class="kh-desc" data-i18n="回顾时显示答案">回顾时显示答案</span></li>
+          <li><span class="kh-keys"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd></span><span class="kh-desc" data-i18n="回顾打分：忘记 / 记得 / 简单（要先看答案）">回顾打分：忘记 / 记得 / 简单（要先看答案）</span></li>
+          <li><span class="kh-keys"><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd></span><span class="kh-desc" data-i18n="网页上把选区一秒存进 ClipKeep">网页上把选区一秒存进 ClipKeep</span></li>
+          <li><span class="kh-keys"><kbd>?</kbd><kbd>Esc</kbd></span><span class="kh-desc" data-i18n="打开 / 关闭这份快捷键说明">打开 / 关闭这份快捷键说明</span></li>
         </ul>
-        <p class="kh-hint">输入框里打字时这些键不生效，放心搜索。</p>
+        <p class="kh-hint" data-i18n="输入框里打字时这些键不生效，放心搜索。">输入框里打字时这些键不生效，放心搜索。</p>
       </div>
     </section>
 
     <!-- 设置面板 -->
     <section class="settings" id="settings" hidden>
       <label class="set-row">
-        <span>每日回顾上限</span>
+        <span data-i18n="界面语言">界面语言</span>
+        <select id="pref-lang" data-i18n-title="扩展界面语言；选「跟随浏览器」时按浏览器的界面语言" title="扩展界面语言；选「跟随浏览器」时按浏览器的界面语言">
+          <option value="auto" data-i18n="跟随浏览器">跟随浏览器</option>
+          <!-- 语言名按该语言本身书写：这一项不翻译，所以不加 data-i18n -->
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <label class="set-row">
+        <span data-i18n="每日回顾上限">每日回顾上限</span>
         <input id="set-cap" type="number" min="1" max="200" step="1" />
       </label>
       <label class="set-row">
-        <span>间隔倍率</span>
+        <span data-i18n="间隔倍率">间隔倍率</span>
         <select id="set-mult">
-          <option value="0.5">0.5×（更快）</option>
-          <option value="1">1×（标准）</option>
-          <option value="2">2×（更慢）</option>
+          <option value="0.5" data-i18n="0.5×（更快）">0.5×（更快）</option>
+          <option value="1" data-i18n="1×（标准）">1×（标准）</option>
+          <option value="2" data-i18n="2×（更慢）">2×（更慢）</option>
         </select>
       </label>
       <label class="set-row">
-        <span>回收站保留</span>
-        <select id="set-ttl" title="删除后可撤销的时长">
-          <option value="1">1 分钟</option>
-          <option value="5">5 分钟</option>
-          <option value="10">10 分钟</option>
-          <option value="30">30 分钟</option>
-          <option value="60">60 分钟</option>
+        <span data-i18n="回收站保留">回收站保留</span>
+        <select id="set-ttl" data-i18n-title="删除后可撤销的时长" title="删除后可撤销的时长">
+          <option value="1" data-i18n="1 分钟">1 分钟</option>
+          <option value="5" data-i18n="5 分钟">5 分钟</option>
+          <option value="10" data-i18n="10 分钟">10 分钟</option>
+          <option value="30" data-i18n="30 分钟">30 分钟</option>
+          <option value="60" data-i18n="60 分钟">60 分钟</option>
         </select>
       </label>
       <label class="set-row">
-        <span>导出标题样式</span>
-        <select id="set-heading" title="Markdown 导出里每条收藏的小标题怎么写">
-          <option value="numbered">编号 + 来源标题</option>
-          <option value="title">仅来源标题</option>
-          <option value="text">正文首句</option>
-          <option value="date">收藏时间</option>
+        <span data-i18n="导出标题样式">导出标题样式</span>
+        <select id="set-heading" data-i18n-title="Markdown 导出里每条收藏的小标题怎么写" title="Markdown 导出里每条收藏的小标题怎么写">
+          <option value="numbered" data-i18n="编号 + 来源标题">编号 + 来源标题</option>
+          <option value="title" data-i18n="仅来源标题">仅来源标题</option>
+          <option value="text" data-i18n="正文首句">正文首句</option>
+          <option value="date" data-i18n="收藏时间">收藏时间</option>
         </select>
       </label>
       <label class="set-row">
-        <span>导出带来源链接</span>
+        <span data-i18n="导出带来源链接">导出带来源链接</span>
         <input id="set-source" type="checkbox" />
       </label>
       <label class="set-row">
         <span>Obsidian front-matter</span>
         <input id="set-fm" type="checkbox" />
       </label>
-      <p class="set-hint">快捷键 <kbd>Alt+Shift+K</kbd> 秒存当前选区；设置只存在本地。</p>
+      <p class="set-hint" data-i18n="快捷键 Alt+Shift+K 秒存当前选区；设置只存在本地。">快捷键 Alt+Shift+K 秒存当前选区；设置只存在本地。</p>
     </section>
 
     <!-- 删除撤销条 -->
     <section class="trashbar" id="trashbar" hidden>
-      <span class="trash-text" id="trash-text">已删除 1 条 · 10 分钟内可撤销</span>
-      <button id="btn-trash-detail" class="mini-btn" title="逐条查看回收站，单独恢复某一条">明细</button>
-      <button id="btn-undo" class="mini-btn primary">撤销</button>
-      <button id="btn-trash-clear" class="mini-btn">清空</button>
+      <span class="trash-text" id="trash-text" data-i18n="已删除 1 条 · 10 分钟内可撤销">已删除 1 条 · 10 分钟内可撤销</span>
+      <button id="btn-trash-detail" class="mini-btn" data-i18n-title="逐条查看回收站，单独恢复某一条" title="逐条查看回收站，单独恢复某一条" data-i18n="明细">明细</button>
+      <button id="btn-undo" class="mini-btn primary" data-i18n="撤销">撤销</button>
+      <button id="btn-trash-clear" class="mini-btn" data-i18n="清空">清空</button>
       <!-- 明细：整批撤销只能一次全捞回来，想只恢复其中一条时靠这里 -->
       <div class="trash-list" id="trash-list" hidden></div>
     </section>
@@ -131,8 +140,8 @@
       <main class="list" id="list">
         <div class="empty" id="empty">
           <div class="empty-ico">★</div>
-          <p>还没有收藏</p>
-          <span>在网页上划选文字，点「收藏」即可留存到这里。</span>
+          <p data-i18n="还没有收藏">还没有收藏</p>
+          <span data-i18n="在网页上划选文字，点「收藏」即可留存到这里。">在网页上划选文字，点「收藏」即可留存到这里。</span>
         </div>
       </main>
     </div>
@@ -148,11 +157,11 @@
     </div>
 
     <footer class="app-footer">
-      <span class="tip">零账号 · 纯本地 · 跨浏览器</span>
+      <span class="tip" data-i18n="零账号 · 纯本地 · 跨浏览器">零账号 · 纯本地 · 跨浏览器</span>
       <div class="foot-actions">
-        <button id="btn-backup" class="link-btn" title="导出全部为 JSON 备份">备份</button>
-        <button id="btn-restore" class="link-btn" title="从 JSON 备份恢复">恢复</button>
-        <button id="btn-clear" class="link-btn danger">清空全部</button>
+        <button id="btn-backup" class="link-btn" data-i18n-title="导出全部为 JSON 备份" title="导出全部为 JSON 备份" data-i18n="备份">备份</button>
+        <button id="btn-restore" class="link-btn" data-i18n-title="从 JSON 备份恢复" title="从 JSON 备份恢复" data-i18n="恢复">恢复</button>
+        <button id="btn-clear" class="link-btn danger" data-i18n="清空全部">清空全部</button>
       </div>
       <input id="file" type="file" accept="application/json,.json" hidden />
     </footer>
@@ -160,17 +169,18 @@
     <!-- 恢复冲突确认 -->
     <div class="modal" id="modal" hidden>
       <div class="modal-card">
-        <h4 id="modal-title">恢复备份</h4>
+        <h4 id="modal-title" data-i18n="恢复备份">恢复备份</h4>
         <div class="modal-body" id="modal-body"></div>
         <div class="modal-actions">
-          <button id="modal-ok" class="mini-btn primary">合并</button>
-          <button id="modal-alt" class="mini-btn danger">覆盖本地</button>
-          <button id="modal-cancel" class="mini-btn">取消</button>
+          <button id="modal-ok" class="mini-btn primary" data-i18n="合并">合并</button>
+          <button id="modal-alt" class="mini-btn danger" data-i18n="覆盖本地">覆盖本地</button>
+          <button id="modal-cancel" class="mini-btn" data-i18n="取消">取消</button>
         </div>
       </div>
     </div>
 
     <div class="toast" id="toast"></div>
+    <script src="i18n.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

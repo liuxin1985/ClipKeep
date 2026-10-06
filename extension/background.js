@@ -5,7 +5,13 @@
  */
 
 // 跨浏览器 API 适配层：Safari 暴露 browser.*，Chrome/Edge 暴露 chrome.*
+if (typeof importScripts === "function") importScripts("i18n.js"); // service worker 没有 window，靠 importScripts 拿文案层
+
 const API = (typeof browser !== "undefined" && browser.runtime) ? browser : chrome;
+// 文案层：i18n.js 没先加载时退化成「原样返回 + 占位替换」，界面宁可全是中文也不能报错
+const I18N = (typeof globalThis !== "undefined" && globalThis.ClipKeepI18N) || null;
+const T = I18N ? I18N.T : (s, a) => String(s).replace(/\{(\d+)\}/g, (m, i) => (a && a[i] != null ? String(a[i]) : m));
+
 
 const STORAGE_KEY = "clipkeep_items";
 const HL_KEY = "clipkeep_highlights";
@@ -739,6 +745,31 @@ function mergeItems(payload) {
   });
 }
 
+/* ---------------- 界面语言 ---------------- */
+
+let langReady = null;
+
+/**
+ * 服务 worker 每次醒来先定一次语言：菜单和 toast 都从文案层出，语言定晚了就赶不上这班车。
+ * 只建一次（缓存这条 promise），免得每条消息都去读一遍存储。
+ */
+function ensureLang() {
+  if (!langReady) {
+    langReady = (async () => {
+      if (!I18N) return "zh";
+      let p = "auto";
+      try {
+        const o = await API.storage.local.get(PREFS_KEY);
+        const prefs = o && o[PREFS_KEY];
+        if (prefs && ["auto", "zh", "en"].indexOf(prefs.lang) >= 0) p = prefs.lang;
+      } catch (_) { /* 读不到就按浏览器界面语言 */ }
+      return I18N.setLang(p);
+    })();
+  }
+  return langReady;
+}
+ensureLang();
+
 /* ---------------- 右键菜单 ---------------- */
 
 function buildMenus() {
@@ -746,22 +777,22 @@ function buildMenus() {
   API.contextMenus.removeAll(() => {
     API.contextMenus.create({
       id: "clipkeep-save",
-      title: "ClipKeep：收藏选中内容",
+      title: T("ClipKeep：收藏选中内容"),
       contexts: ["selection"],
     });
     API.contextMenus.create({
       id: "clipkeep-save-image",
-      title: "ClipKeep：收藏这张图片",
+      title: T("ClipKeep：收藏这张图片"),
       contexts: ["image"],
     });
     API.contextMenus.create({
       id: "clipkeep-save-link",
-      title: "ClipKeep：收藏这个链接",
+      title: T("ClipKeep：收藏这个链接"),
       contexts: ["link"],
     });
     API.contextMenus.create({
       id: "clipkeep-reader",
-      title: "ClipKeep：净化阅读本页",
+      title: T("ClipKeep：净化阅读本页"),
       contexts: ["page"],
     });
     if (API.runtime.lastError) void API.runtime.lastError; // 读取以抑制告警
@@ -773,29 +804,42 @@ function buildMenus() {
 if (API.runtime && API.runtime.onInstalled) {
   API.runtime.onInstalled.addListener((details) => {
     const reason = (details && details.reason) || "install";
-    if (reason === "install" || reason === "update") buildMenus();
+    // 菜单文案由浏览器持久保存，建的时候就定死了：先定语言再建，英文用户不该装完还是中文菜单
+    if (reason === "install" || reason === "update") ensureLang().then(buildMenus);
+  });
+}
+
+// 语言偏好是弹窗里改的，后台得跟着重建菜单；其它偏好变化不动菜单，别让用户点不到
+if (API.storage && API.storage.onChanged) {
+  API.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !I18N || !changes[PREFS_KEY]) return;
+    const next = (changes[PREFS_KEY].newValue || {}).lang;
+    const before = I18N.lang();
+    I18N.setLang(["auto", "zh", "en"].indexOf(next) >= 0 ? next : "auto");
+    if (I18N.lang() !== before) buildMenus();
   });
 }
 
 /** 把底层错误翻译成用户能看懂的话（不要把配额不足之类误报成「内容为空」） */
 function saveFailMessage(err) {
   const s = String((err && err.message) || err || "");
-  if (/quota|exceeded/i.test(s)) return "保存失败：本地存储已满，请先导出备份清理";
-  return "保存失败，请刷新页面后重试";
+  if (/quota|exceeded/i.test(s)) return T("保存失败：本地存储已满，请先导出备份清理");
+  return T("保存失败，请刷新页面后重试");
 }
 
 /** 把一次收藏请求落盘，并把结果作为 toast 回给页面 */
 async function saveClip(tab, payload) {
   try {
+    await ensureLang(); // 冷启动第一条提示可能赶在语言定下来之前，等一次不值得省
     const res = await addItem(payload);
     notifyTab(tab.id, {
       type: "clipkeep:toast",
       message: res.ok
-        ? res.dup ? "这条已经在收藏里了"
+        ? res.dup ? T("这条已经在收藏里了")
           // 超长只存了前半部分，提示要说出来，否则用户以为剪到了全文
-          : res.item && res.item.truncated ? `已收藏 ✓（超过 ${MAX_TEXT} 字，已截断）`
-          : "已收藏 ✓"
-        : res.error === "empty" ? "内容为空" : saveFailMessage(res),
+          : res.item && res.item.truncated ? T("已收藏 ✓（超过 {0} 字，已截断）", [MAX_TEXT])
+          : T("已收藏 ✓")
+        : res.error === "empty" ? T("内容为空") : saveFailMessage(res),
     });
   } catch (err) {
     notifyTab(tab.id, { type: "clipkeep:toast", message: saveFailMessage(err) });
@@ -815,14 +859,14 @@ if (API.contextMenus && API.contextMenus.onClicked) {
       // 地址要在入库前判协议和长度：伪协议在菜单里点得到，但绝不能变成可点的链接，
       // 超长地址也不能悄悄截成另一个地址
       if (!mediaUrlOk(url)) {
-        notifyTab(tab.id, { type: "clipkeep:toast", message: "这个地址无法收藏（不是 http(s) 或过长）" });
+        notifyTab(tab.id, { type: "clipkeep:toast", message: T("这个地址无法收藏（不是 http(s) 或过长）") });
         return;
       }
       const label = isImage ? imageLabel(url) : (info.selectionText || "").trim() || linkLabel(url);
       await saveClip(tab, {
         kind: isImage ? "image" : "link",
         [isImage ? "image" : "link"]: url,
-        text: label || "未命名",
+        text: label || T("未命名"),
         url: info.pageUrl || tab.url || "",
         title: tab.title || "",
       });

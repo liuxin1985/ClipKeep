@@ -8,10 +8,17 @@
   window.__clipkeepInjected = true;
 
   const API = (typeof browser !== "undefined" && browser.runtime) ? browser : chrome;
+  // 文案层：i18n.js 没先加载时退化成「原样返回 + 占位替换」，界面宁可全是中文也不能报错
+  const I18N = (typeof globalThis !== "undefined" && globalThis.ClipKeepI18N) || null;
+  const T = I18N ? I18N.T : (s, a) => String(s).replace(/\{(\d+)\}/g, (m, i) => (a && a[i] != null ? String(a[i]) : m));
+
   const NS = "clipkeep";
   const HL_KEY = "clipkeep_highlights";
+  const PREFS_KEY = "clipkeep_prefs";
   const COLORS = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
+  // 颜色名存 msgid 而不是译文：模块加载时语言还没读到，此时翻译会冻住一种语言
   const COLOR_NAMES = { yellow: "黄色", green: "绿色", pink: "粉色", blue: "蓝色" };
+  const colorName = (k) => T(COLOR_NAMES[k] || k);
   // 分段锚点的上下文长度与段数上限，与后台 cleanSegs 同口径（后台是信任边界，这里是产出方）
   const SEG_CTX = 24;
   const SEG_MAX = 64;
@@ -67,7 +74,7 @@
   function noteStorageDead(err) {
     const s = String((err && err.message) || err || "");
     if (/invalidated|context|deleted/i.test(s)) contextLost = true;
-    toast(contextLost ? RELOAD_HINT : STORE_HINT);
+    toast(T(contextLost ? RELOAD_HINT : STORE_HINT));
   }
   function silentStorageDead(err) {
     const s = String((err && err.message) || err || "");
@@ -92,7 +99,7 @@
    */
   async function hlWrite(msg) {
     if (contextLost) {
-      toast(RELOAD_HINT);
+      toast(T(RELOAD_HINT));
       return null;
     }
     let res = null;
@@ -126,7 +133,7 @@
       .map(
         (k) =>
           `<button class="${NS}-swatch${k === hlColor ? " active" : ""}" type="button" data-color="${k}"` +
-          ` style="background:${COLORS[k]}" title="以${COLOR_NAMES[k] || k}高亮"></button>`
+          ` style="background:${COLORS[k]}" title="${T("以{0}高亮", [colorName(k)])}"></button>`
       )
       .join("");
   }
@@ -144,10 +151,10 @@
     toolbar.id = NS + "-toolbar";
     toolbar.className = NS + "-toolbar";
     toolbar.innerHTML = `
-      <button class="${NS}-btn ${NS}-btn-save" type="button">★ 收藏</button>
-      <button class="${NS}-btn ${NS}-btn-hl" type="button" title="用当前颜色高亮">🖍</button>
-      <button class="${NS}-btn ${NS}-btn-note" type="button" title="批注">✎</button>
-      <button class="${NS}-btn ${NS}-btn-read" type="button">阅读</button>
+      <button class="${NS}-btn ${NS}-btn-save" type="button">★ ${T("收藏")}</button>
+      <button class="${NS}-btn ${NS}-btn-hl" type="button" title="${T("用当前颜色高亮")}">🖍</button>
+      <button class="${NS}-btn ${NS}-btn-note" type="button" title="${T("批注")}">✎</button>
+      <button class="${NS}-btn ${NS}-btn-read" type="button">${T("阅读")}</button>
       <span class="${NS}-swatches">${swatchHtml()}</span>
     `;
     toolbar.addEventListener("mousedown", (e) => e.preventDefault());
@@ -251,13 +258,13 @@
     card.id = NS + "-card";
     card.className = NS + "-card";
     card.innerHTML = `
-      <div class="${NS}-card-head">收藏内容</div>
+      <div class="${NS}-card-head">${T("收藏内容")}</div>
       <div class="${NS}-quote"></div>
-      <textarea class="${NS}-note" placeholder="添加备注（可选）" rows="2"></textarea>
-      <input class="${NS}-tags" placeholder="标签，用逗号分隔（可选）" />
+      <textarea class="${NS}-note" placeholder="${T("添加备注（可选）")}" rows="2"></textarea>
+      <input class="${NS}-tags" placeholder="${T("标签，用逗号分隔（可选）")}" />
       <div class="${NS}-card-actions">
-        <button class="${NS}-btn ${NS}-btn-cancel" type="button">取消</button>
-        <button class="${NS}-btn ${NS}-btn-confirm" type="button">保存</button>
+        <button class="${NS}-btn ${NS}-btn-cancel" type="button">${T("取消")}</button>
+        <button class="${NS}-btn ${NS}-btn-confirm" type="button">${T("保存")}</button>
       </div>
     `;
     card.addEventListener("mousedown", (e) => e.stopPropagation());
@@ -275,12 +282,12 @@
   function openCard(text) {
     if (!text) return;
     const c = ensureCard();
-    c.querySelector("." + NS + "-card-head").textContent = "收藏内容";
+    c.querySelector("." + NS + "-card-head").textContent = T("收藏内容");
     c.querySelector("." + NS + "-quote").textContent =
       text.length > 200 ? text.slice(0, 200) + "…" : text;
     c.querySelector("." + NS + "-quote").style.display = "block";
     c.querySelector("." + NS + "-note").value = "";
-    c.querySelector("." + NS + "-note").placeholder = "添加备注（可选）";
+    c.querySelector("." + NS + "-note").placeholder = T("添加备注（可选）");
     const tagsEl = c.querySelector("." + NS + "-tags");
     tagsEl.style.display = "block";
     tagsEl.value = "";
@@ -297,12 +304,12 @@
 
   /** 收藏结果的用户话术：重复入库要说「已经存过」，别报一个假的「已收藏」 */
   function saveToast(res) {
-    if (res && res.dup) return "这条已经在收藏里了";
+    if (res && res.dup) return T("这条已经在收藏里了");
     if (res && res.ok) {
       // 只存了前半部分就说「已收藏 ✓」，用户会以为自己剪到了全文
-      return res.item && res.item.truncated ? "已收藏 ✓（内容过长，已截断）" : "已收藏 ✓";
+      return res.item && res.item.truncated ? T("已收藏 ✓（内容过长，已截断）") : T("已收藏 ✓");
     }
-    return "保存失败";
+    return T("保存失败");
   }
 
   async function saveFromCard() {
@@ -337,7 +344,7 @@
     mark.dataset.hlid = id;
     mark.style.background = color;
     if (note) {
-      mark.title = "ClipKeep 批注：" + note;
+      mark.title = T("ClipKeep 批注：") + note;
       mark.classList.add("has-note");
     }
     return mark;
@@ -481,7 +488,7 @@
 
   async function createHighlight(sel, colorKey, note) {
     if (!sel || !sel.range) {
-      toast("请先选中文字");
+      toast(T("请先选中文字"));
       return;
     }
     let segs = captureSegs(sel.range);
@@ -492,7 +499,7 @@
     if (segs && flatText(segs.map((s) => s.t).join("")) !== flatText(sel.text)) segs = null;
     const text = segs ? segs.map((s) => s.t).join("") : sel.text;
     if (!text) {
-      toast("请先选中文字");
+      toast(T("请先选中文字"));
       return;
     }
     const id = makeId();
@@ -501,7 +508,7 @@
     try {
       wrapRange(sel.range, mark);
     } catch (e) {
-      toast("该处无法高亮");
+      toast(T("该处无法高亮"));
       return;
     }
     // 写入走后台 upsert，不再读整表回写：那样会抹掉别的标签页同时新增的高亮
@@ -519,12 +526,16 @@
     if (!wr || wr === "gone") { unwrapMark(mark); return; }
     window.getSelection().removeAllRanges();
     // 有了分段锚点，跨元素的选区也找得回来；只有锚点太碎、退回整段查找时才需要那句保留话术
-    const word = note ? "已批注" : "已高亮";
+    const noteDone = !!note;
+    const word = noteDone ? T("已批注") : T("已高亮");
     // 后台砍过正文就不能只报 ✓：少存的那一截刷新后不会再出现，得当场说清楚
     if (wr && wr.truncated) {
-      toast(`${word}（正文超过 ${wr.limit} 字，已截断）`);
+      // 「已高亮」和「已批注」各配一句：英文里两个动词的时态不一样，拼不通
+      toast(noteDone
+        ? T("已批注（正文超过 {0} 字，已截断）", [wr.limit])
+        : T("已高亮（正文超过 {0} 字，已截断）", [wr.limit]));
     } else {
-      toast(segs || replayable(sel.range) ? word + " ✓" : word + "（跨元素，刷新后可能不显示）");
+      toast(segs || replayable(sel.range) ? word + " ✓" : word + T("（跨元素，刷新后可能不显示）"));
     }
   }
 
@@ -569,15 +580,15 @@
 
   function openNoteForRange(sel) {
     if (!sel || !sel.range) {
-      toast("请先选中文字");
+      toast(T("请先选中文字"));
       return;
     }
     const c = ensureCard();
-    c.querySelector("." + NS + "-card-head").textContent = "添加批注";
+    c.querySelector("." + NS + "-card-head").textContent = T("添加批注");
     c.querySelector("." + NS + "-quote").style.display = "none";
     const noteEl = c.querySelector("." + NS + "-note");
     noteEl.value = "";
-    noteEl.placeholder = "写下你的批注…";
+    noteEl.placeholder = T("写下你的批注…");
     c.querySelector("." + NS + "-tags").style.display = "none";
     c.dataset.text = sel.text;
     centerCard(c, 300, 180);
@@ -761,7 +772,7 @@
     const hl = list.find((h) => h.id === id);
     if (!hl) { unwrapMarksFor(id); return; } // 存储里已删除：顺手清掉页面上的残留（可能是好几段）
     const action = prompt(
-      "ClipKeep 批注：" + (hl.note || "（无）") + "\n\n输入新批注内容并回车保存；输入 !d 回车删除该高亮。",
+      T("ClipKeep 批注：") + (hl.note || T("（无）")) + T("\n\n输入新批注内容并回车保存；输入 !d 回车删除该高亮。"),
       hl.note || ""
     );
     if (action === null) return;
@@ -770,24 +781,24 @@
       const r = await hlWrite({ type: "clipkeep:hl-delete", id });
       if (r === "gone") {
         unwrapMarksFor(id); // 存储里早没了：清掉残留标记，提示说清去向
-        toast(GONE_HINT);
+        toast(T(GONE_HINT));
       } else if (r) {
         unwrapMarksFor(id);
-        toast("已删除高亮");
+        toast(T("已删除高亮"));
       }
     } else {
       const note = action.trim();
       const r = await hlWrite({ type: "clipkeep:hl-update", id, patch: { note } });
       if (r === "gone") {
         unwrapMarksFor(id);
-        toast(GONE_HINT);
+        toast(T(GONE_HINT));
       } else if (r) {
         // 重叠的高亮在页面上是几段，批注要一起改，否则只有点到的那段带新批注
         marksFor(id).forEach((m) => {
-          m.title = note ? "ClipKeep 批注：" + note : "";
+          m.title = note ? T("ClipKeep 批注：") + note : "";
           m.classList.toggle("has-note", !!note);
         });
-        toast("批注已更新 ✓");
+        toast(T("批注已更新 ✓"));
       }
     }
   }, true);
@@ -833,7 +844,7 @@
     if (readerRoot) return;
     const main = findMainContent();
     if (!main) {
-      toast("未能提取正文");
+      toast(T("未能提取正文"));
       return;
     }
     const clone = main.cloneNode(true);
@@ -850,9 +861,9 @@
     readerRoot.className = NS + "-reader";
     readerRoot.innerHTML = `
       <div class="${NS}-reader-bar">
-        <span class="${NS}-reader-title">ClipKeep 净化阅读</span>
-        <button class="${NS}-btn" type="button" data-act="save-all">收藏全文</button>
-        <button class="${NS}-btn" type="button" data-act="exit">退出</button>
+        <span class="${NS}-reader-title">ClipKeep ${T("净化阅读")}</span>
+        <button class="${NS}-btn" type="button" data-act="save-all">${T("收藏全文")}</button>
+        <button class="${NS}-btn" type="button" data-act="exit">${T("退出")}</button>
       </div>
       <article class="${NS}-reader-body"></article>
     `;
@@ -869,11 +880,11 @@
         const full = (clone.innerText || "").trim();
         const res = await send({
           type: "clipkeep:add",
-          payload: { text: full, tags: "全文", url: location.href, title: document.title },
+          payload: { text: full, tags: T("全文"), url: location.href, title: document.title },
         });
         const okAll = res && res.ok;
         const cut = okAll && res.item && res.item.truncated;
-        toast(res && res.dup ? "全文已经收藏过了" : okAll ? (cut ? "已收藏全文 ✓（正文过长，已截断）" : "已收藏全文 ✓") : "收藏失败");
+        toast(res && res.dup ? T("全文已经收藏过了") : okAll ? (cut ? T("已收藏全文 ✓（正文过长，已截断）") : T("已收藏全文 ✓")) : T("收藏失败"));
       }
     });
   }
@@ -891,7 +902,7 @@
   async function saveSelection() {
     const text = getSelectionText();
     if (!text) {
-      toast("没有选中的文字");
+      toast(T("没有选中的文字"));
       return false;
     }
     const res = await send({
@@ -919,10 +930,26 @@
     });
   }
 
+  /**
+   * 界面语言：只读偏好、只换自己浮层的文案。
+   * 宿主页面的 <html lang> 一个字都不动——那是人家的文档，我们只是路过的工具条。
+   */
+  async function readLang() {
+    if (!I18N) return;
+    try {
+      const o = await API.storage.local.get(PREFS_KEY);
+      const p = o && o[PREFS_KEY];
+      I18N.setLang(["auto", "zh", "en"].indexOf(p && p.lang) >= 0 ? p.lang : "auto");
+    } catch (_) { /* 存储读不到就维持浏览器语言，浮层照样能用 */ }
+  }
+  readLang();
+
   // 跨标签页高亮实时同步
   if (API.storage && API.storage.onChanged) {
     API.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && changes[HL_KEY]) applyHighlights();
+      if (area !== "local") return;
+      if (changes[HL_KEY]) applyHighlights();
+      if (changes[PREFS_KEY]) readLang(); // 弹窗里换了语言，页面浮层次一次就跟着换
     });
   }
 

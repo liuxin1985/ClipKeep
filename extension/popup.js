@@ -6,6 +6,22 @@
  */
 (() => {
   const API = (typeof browser !== "undefined" && browser.runtime) ? browser : chrome;
+  // 文案层：i18n.js 没先加载时退化成「原样返回 + 占位替换」，界面宁可全是中文也不能报错
+  const I18N = (typeof globalThis !== "undefined" && globalThis.ClipKeepI18N) || null;
+  const T = I18N ? I18N.T : (s, a) => String(s).replace(/\{(\d+)\}/g, (m, i) => (a && a[i] != null ? String(a[i]) : m));
+  const LANGS = ["auto", "zh", "en"]; // 与 popup.html 里 #pref-lang 的三个 option 同口径
+
+  /**
+   * 把当前偏好变成界面语言：翻静态外壳（data-i18n）并标好 <html lang>。
+   * 列表、卡片都是每次 render 现从 T() 取，所以动态部分不需要单独再翻一次。
+   */
+  function applyLang() {
+    if (!I18N) return;
+    I18N.setLang(LANGS.indexOf(prefs && prefs.lang) >= 0 ? prefs.lang : "auto");
+    I18N.applyDocumentLang();
+    I18N.localize(document);
+  }
+
   const STORAGE_KEY = "clipkeep_items";
   const HL_KEY = "clipkeep_highlights";
   const TRASH_KEY = "clipkeep_trash";
@@ -22,7 +38,9 @@
   const TRASH_DETAIL_MAX = 50; // 回收站明细一次最多列几行，超出如实说还有多少
   const TRASH_MINS = [1, 5, 10, 30, 60]; // 回收站可选保留时长
   const DEFAULT_TRASH_MINS = 10;
-  const KIND_LABELS = { text: "文字", image: "图片", link: "链接" }; // 列表筛选 chip 的文案
+  // 类型徽标存 msgid：模块加载时语言还没读到，此处翻译会把中文冻进英文界面
+  const KIND_LABELS = { text: "文字", image: "图片", link: "链接" };
+  const kindLabel = (k) => T(KIND_LABELS[k] || k);
   const KIND_ORDER = ["text", "image", "link"]; // 后台只认这三种，顺序固定免得 chip 乱跳
   const SITE_CHIPS_MAX = 12; // 站点 chip 的渲染上限：库里几百个站时不能铺成一堵墙
   const HEADINGS = ["numbered", "title", "text", "date"]; // Markdown 导出的小标题写法
@@ -43,14 +61,14 @@
     try {
       return await API.runtime.sendMessage(msg); // 唯一一处裸调用：这里就是要抓失联异常
     } catch (_) {
-      toast(DEAD_BACKEND);
+      toast(T(DEAD_BACKEND));
       return { ok: false, error: "dead_backend" };
     }
   }
 
   /** 失败提示统一走这里：后台失联时「请重试」是句废话，重开弹窗才有用 */
   function failToast(res, fallback) {
-    toast(res && res.error === "dead_backend" ? DEAD_BACKEND : fallback);
+    toast(res && res.error === "dead_backend" ? T(DEAD_BACKEND) : fallback);
   }
 
   const $ = (id) => document.getElementById(id);
@@ -165,7 +183,7 @@
   function mediaLabel(it) {
     const url = mediaOf(it);
     if (!url) return "";
-    return it.kind === "image" ? "查看原图" : hostname(url);
+    return it.kind === "image" ? T("查看原图") : hostname(url);
   }
 
   /**
@@ -223,6 +241,7 @@
     items = Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [];
     marks = Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [];
     prefs = obj[PREFS_KEY] || {};
+    applyLang(); // 存储里的显式语言覆盖「跟随浏览器」那次预判，必须赶在渲染之前
     const log = obj[ACTIVITY_KEY];
     activity = log && typeof log === "object" && !Array.isArray(log) ? log : {};
     trash = await readTrash();
@@ -255,6 +274,7 @@
     $("set-heading").value = tpl.heading;
     $("set-source").checked = tpl.source;
     $("set-fm").checked = tpl.frontMatter;
+    $("pref-lang").value = LANGS.indexOf(prefs && prefs.lang) >= 0 ? prefs.lang : "auto";
   }
 
   /**
@@ -392,7 +412,7 @@
     const siteHtml = sorted.length < 2 ? ""
       : shown.map(([h, n]) => `<button class="chip site ${h === activeSite ? "active" : ""}" data-site="${esc(h)}" title="${esc(h)}">${esc(h)} ${n}</button>`).join("")
         + (sorted.length > shown.length
-            ? `<span class="f-more" title="还有 ${sorted.length - shown.length} 个站点没有列出，用搜索找它们的域名">+${sorted.length - shown.length} 站</span>`
+            ? `<span class="f-more" title="${T("还有 {0} 个站点没有列出，用搜索找它们的域名", [sorted.length - shown.length])}">${T("+{0} 站", [sorted.length - shown.length])}</span>`
             : "");
     filterEl.innerHTML = kindHtml + siteHtml;
     restoreChipFocus(filterEl, keep);
@@ -431,14 +451,14 @@
     if (queued > 0) {
       dueEl.hidden = false;
       dueEl.textContent = due > queued ? `${queued}/${due}` : String(queued);
-      dueEl.title = due > queued ? `每日上限 ${queued} 条，剩余 ${due - queued} 条明天继续` : "今日待回顾";
+      dueEl.title = due > queued ? T("每日上限 {0} 条，剩余 {1} 条明天继续", [queued, due - queued]) : T("今日待回顾");
     } else {
       dueEl.hidden = true;
     }
 
     // 工具条按视图取用：收藏和高亮共用搜索框，回顾没有搜索
     toolbarEl.hidden = view === "review";
-    searchEl.placeholder = view === "marks" ? "搜索高亮与批注…" : "搜索收藏内容…";
+    searchEl.placeholder = view === "marks" ? T("搜索高亮与批注…") : T("搜索收藏内容…");
     sortEl.hidden = view !== "clips";
     $("btn-tags").hidden = view !== "clips";
     $("btn-hl-export").hidden = view !== "marks";
@@ -457,13 +477,13 @@
       emptyEl.style.display = "block";
       // 库里明明有东西却一条不显示，提示就得说「是筛选筛掉的」，不能谎称还没有收藏
       const filtering = Boolean(activeTag || activeKind || activeSite || searchEl.value.trim());
-      emptyEl.querySelector("p").textContent = items.length === 0 ? "还没有收藏" : filtering ? "筛选后没有结果" : "无匹配结果";
+      emptyEl.querySelector("p").textContent = items.length === 0 ? T("还没有收藏") : filtering ? T("筛选后没有结果") : T("无匹配结果");
       emptyEl.querySelector("span").textContent =
         items.length === 0
-          ? "在网页上划选文字，点「收藏」即可留存到这里。"
+          ? T("在网页上划选文字，点「收藏」即可留存到这里。")
           : filtering
-            ? "当前有关键词 / 标签 / 类型 / 站点筛选，去掉一个试试。"
-            : "换个关键词或标签试试。";
+            ? T("当前有关键词 / 标签 / 类型 / 站点筛选，去掉一个试试。")
+            : T("换个关键词或标签试试。");
       return;
     }
     emptyEl.style.display = "none";
@@ -485,34 +505,34 @@
     const link = it.url
       ? src
         ? `<a href="${esc(src)}" target="_blank" rel="noopener" title="${esc(it.title || src)}">${esc(it.title || hostname(src))}</a>`
-        : `<span class="item-src" title="来源不是可点击的地址">${esc(it.title || it.url)}</span>`
+        : `<span class="item-src" title="${T("来源不是可点击的地址")}">${esc(it.title || it.url)}</span>`
       : "";
     // 收藏正文超过 2 万字会被截断，标记要露出来，否则用户不知道内容不完整
     const trunc = it.truncated
-      ? `<span class="badge-warn" title="内容超过 ${MAX_TEXT} 字，仅保存了前半部分">已截断</span>`
+      ? `<span class="badge-warn" title="${T("内容超过 {0} 字，仅保存了前半部分", [MAX_TEXT])}">${T("已截断")}</span>`
       : "";
     // 图片 / 链接收藏：显示类型徽标 + 可点开的目标地址（不在扩展页里远程加载图）
     const isMedia = it.kind === "image" || it.kind === "link";
     const kindBadge = isMedia
-      ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>`
+      ? `<span class="badge-kind">${kindLabel(it.kind)}</span>`
       : "";
     const mediaLink = mediaLinkHtml(it);
     const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
     const on = selected.has(it.id);
     return `
       <div class="item${on ? " selected" : ""}${it.id === focusId ? " focused" : ""}" data-id="${esc(it.id)}">
-        <label class="item-sel" title="勾选后可批量删除 / 加标签 / 导出">
-          <input type="checkbox" data-act="sel" aria-label="选择这条收藏"${on ? " checked" : ""} />
+        <label class="item-sel" title="${T("勾选后可批量删除 / 加标签 / 导出")}">
+          <input type="checkbox" data-act="sel" aria-label="${T("选择这条收藏")}"${on ? " checked" : ""} />
         </label>
         <div class="item-text${longClip ? " is-clamped" : ""}">${hit(text, q)}</div>
         ${note}
         <div class="item-meta">${trunc}${kindBadge}${tags}${mediaLink}${link}<span>${fmtDate(it.createdAt)}</span></div>
         <div class="item-actions">
-          <button class="mini-btn" data-act="copy">复制</button>
-          <button class="mini-btn" data-act="tag">加标签</button>
-          <button class="mini-btn" data-act="export">导出</button>
-          ${longClip ? `<button class="mini-btn" data-act="more">展开全文</button>` : ""}
-          <button class="mini-btn danger" data-act="del">删除</button>
+          <button class="mini-btn" data-act="copy">${T("复制")}</button>
+          <button class="mini-btn" data-act="tag">${T("加标签")}</button>
+          <button class="mini-btn" data-act="export">${T("导出")}</button>
+          ${longClip ? `<button class="mini-btn" data-act="more">${T("展开全文")}</button>` : ""}
+          <button class="mini-btn danger" data-act="del">${T("删除")}</button>
         </div>
       </div>`;
   }
@@ -520,7 +540,8 @@
   /* ---------- 高亮 / 批注视图 ---------- */
 
   const COLOR_HEX = { yellow: "#fff3a3", green: "#c7f5c7", pink: "#ffd0e0", blue: "#cfe3ff" };
-  const COLOR_NAMES = { yellow: "黄色", green: "绿色", pink: "粉色", blue: "蓝色" };
+  const COLOR_NAMES = { yellow: "黄色", green: "绿色", pink: "粉色", blue: "蓝色" }; // msgid，用的时候才翻
+  const colorName = (k) => T(COLOR_NAMES[k] || k);
 
   /** 换色按固定顺序轮转；库里颜色不合法时从黄色重新开始 */
   function nextHlColor(cur) {
@@ -562,7 +583,7 @@
     const note = h.note ? `<div class="hl-note">✎ ${hit(h.note, q)}</div>` : "";
     const key = COLOR_HEX[h.color] ? h.color : "yellow";
     const bg = COLOR_HEX[key];
-    const next = COLOR_NAMES[nextHlColor(h.color)] || "黄色";
+    const next = colorName(nextHlColor(h.color));
     return `
       <div class="hl-item" data-hlid="${esc(h.id)}">
         <span class="hl-swatch" style="background:${bg}"></span>
@@ -572,9 +593,9 @@
           <div class="hl-meta">${fmtDate(h.createdAt)}</div>
         </div>
         <div class="hl-actions">
-          <button class="mini-btn" data-act="hl-copy">复制</button>
-          <button class="mini-btn" data-act="hl-color" title="当前${COLOR_NAMES[key]}，点击换成${next}">换色</button>
-          <button class="mini-btn danger" data-act="hl-del">删除</button>
+          <button class="mini-btn" data-act="hl-copy">${T("复制")}</button>
+          <button class="mini-btn" data-act="hl-color" title="${T("当前{0}，点击换成{1}", [colorName(key), next])}">${T("换色")}</button>
+          <button class="mini-btn danger" data-act="hl-del">${T("删除")}</button>
         </div>
       </div>`;
   }
@@ -587,11 +608,11 @@
     const q = searchEl.value.trim();
     const groups = hlGroups();
     if (!marks.length) {
-      marksEl.innerHTML = hlEmpty("🖍", "还没有高亮", "在网页上划选文字，点工具条的 🖍 高亮或 ✎ 批注。");
+      marksEl.innerHTML = hlEmpty("🖍", T("还没有高亮"), T("在网页上划选文字，点工具条的 🖍 高亮或 ✎ 批注。"));
       return;
     }
     if (!groups.length) {
-      marksEl.innerHTML = hlEmpty("🔍", "无匹配结果", "换个关键词试试。");
+      marksEl.innerHTML = hlEmpty("🔍", T("无匹配结果"), T("换个关键词试试。"));
       return;
     }
     marksEl.innerHTML = groups
@@ -613,20 +634,20 @@
   /** 导出当前筛选结果为 Markdown，按页面分组 */
   function exportHighlights() {
     const groups = hlGroups();
-    if (!groups.length) return toast("没有可导出的高亮");
-    const lines = ["# ClipKeep 高亮与批注", "", `导出时间：${fmtDate(Date.now())}`, ""];
+    if (!groups.length) return toast(T("没有可导出的高亮"));
+    const lines = [T("# ClipKeep 高亮与批注"), "", T("导出时间：{0}", [fmtDate(Date.now())]), ""];
     groups.forEach(([url, list]) => {
       lines.push(`## ${hlPageName(url, list)}`);
-      if (url) lines.push(`**来源**: ${url}`);
+      if (url) lines.push(T("**来源**: {0}", [url]));
       lines.push("");
       list.forEach((h) => {
         const text = String(h.text).replace(/\s*\n\s*/g, " ");
-        lines.push(`- ==${text}==` + (h.note ? ` — 批注：${String(h.note).replace(/\s*\n\s*/g, " ")}` : ""));
+        lines.push(`- ==${text}==` + (h.note ? T(" — 批注：{0}", [String(h.note).replace(/\s*\n\s*/g, " ")]) : ""));
       });
       lines.push("");
     });
     download(lines.join("\n"), `clipkeep-highlights-${Date.now()}.md`);
-    toast(`已导出 ${hlFiltered().length} 条高亮`);
+    toast(T("已导出 {0} 条高亮", [hlFiltered().length]));
   }
 
   marksEl.addEventListener("click", async (e) => {
@@ -642,19 +663,19 @@
     else if (act === "hl-color") {
       // 换色也走后台：那里有颜色白名单，且整条写链保证不抹掉别处的改动
       const res = await send({ type: "clipkeep:hl-update", id, patch: { color: nextHlColor(h.color) } });
-      if (!res || !res.ok) return failToast(res, "换色失败，请重试");
+      if (!res || !res.ok) return failToast(res, T("换色失败，请重试"));
       await load();
-      toast("已换色");
+      toast(T("已换色"));
     } else if (act === "hl-del") {
       // 走后台：进回收站 + 串行写，避免整表覆盖抹掉别处新增的高亮
       const res = await send({ type: "clipkeep:hl-delete", id });
       if (!res || !res.ok) {
-        if (res && res.error === "not_found") { await load(); toast("这条高亮已经不在了"); }
-        else failToast(res, "删除失败，请重试");
+        if (res && res.error === "not_found") { await load(); toast(T("这条高亮已经不在了")); }
+        else failToast(res, T("删除失败，请重试"));
         return;
       }
       await load();
-      toast("已删除高亮");
+      toast(T("已删除高亮"));
     }
   });
 
@@ -669,18 +690,25 @@
       trashListEl.innerHTML = "";
       return;
     }
-    const kinds = new Set(trash.map((t) => (t && t.kind === "hl" ? "高亮" : "收藏")));
-    const what = kinds.size === 1 ? [...kinds][0] : "";
-    trashTextEl.textContent = `已删除 ${trash.length} 条${what} · ${trashMins()} 分钟内可撤销`;
+    // 类型直接写进整句而不是拼进去：中文的「5 条收藏」拼起来顺，
+    // 英文的 "5 items" + "Clip" 拼起来是病句，所以每种情况一句完整文案。
+    const kinds = new Set(trash.map((t) => (t && t.kind === "hl" ? "hl" : "item")));
+    const single = kinds.size === 1 ? [...kinds][0] : null;
+    const mins = trashMins();
+    trashTextEl.textContent = single === "hl"
+      ? T("已删除 {0} 条高亮 · {1} 分钟内可撤销", [trash.length, mins])
+      : single === "item"
+        ? T("已删除 {0} 条收藏 · {1} 分钟内可撤销", [trash.length, mins])
+        : T("已删除 {0} 条 · {1} 分钟内可撤销", [trash.length, mins]);
     // 「撤销」只还原最近一批（同一个撤销号），回收站里可能还压着更早的批次。
     // 只写「撤销」配一句「已删除 5 条」，用户会以为点一下全回来，实际只捞回 2 条。
     const latestTid = trash[0] && trash[0].tid;
     const latest = trash.filter((t) => t && t.tid === latestTid).length;
     const batches = new Set(trash.map((t) => t && t.tid)).size;
     const undoBtn = $("btn-undo");
-    undoBtn.textContent = batches > 1 ? `撤销这批 ${latest} 条` : "撤销";
-    undoBtn.title = batches > 1 ? `回收站里还有更早的 ${trash.length - latest} 条，逐条恢复请点「明细」` : "";
-    $("btn-trash-detail").textContent = trashDetailOpen ? "收起" : "明细";
+    undoBtn.textContent = batches > 1 ? T("撤销这批 {0} 条", [latest]) : T("撤销");
+    undoBtn.title = batches > 1 ? T("回收站里还有更早的 {0} 条，逐条恢复请点「明细」", [trash.length - latest]) : "";
+    $("btn-trash-detail").textContent = trashDetailOpen ? T("收起") : T("明细");
     renderTrashDetail();
   }
 
@@ -698,16 +726,16 @@
     const rows = trash.slice(0, TRASH_DETAIL_MAX).map((t) => {
       const it = (t && t.item) || {};
       const kind = t.kind === "hl" ? "hl" : "clip";
-      const label = kind === "hl" ? "高亮" : "收藏";
-      const text = String(it.text || "（无正文）");
+      const label = kind === "hl" ? T("高亮") : T("收藏");
+      const text = String(it.text || T("（无正文）"));
       return `<div class="trash-row" data-kind="${kind}" data-id="${esc(it.id || "")}">`
         + `<span class="tr-kind">${label}</span>`
         + `<span class="tr-text">${esc(text)}</span>`
-        + `<button class="mini-btn" data-act="trash-restore-one">恢复</button>`
+        + `<button class="mini-btn" data-act="trash-restore-one">${T("恢复")}</button>`
         + `</div>`;
     }).join("");
     const more = trash.length > TRASH_DETAIL_MAX
-      ? `<p class="tr-more">另有 ${trash.length - TRASH_DETAIL_MAX} 条未列出（只列最近 ${TRASH_DETAIL_MAX} 条）</p>`
+      ? `<p class="tr-more">${T("另有 {0} 条未列出（只列最近 {1} 条）", [trash.length - TRASH_DETAIL_MAX, TRASH_DETAIL_MAX])}</p>`
       : "";
     trashListEl.innerHTML = rows + more;
   }
@@ -728,12 +756,15 @@
       const res = await send({ type: "clipkeep:trash-restore-one", payload: { kind, id } });
       await load(); // 恢复成功与否都要重画明细，点了没反应的行不能继续留在列表里
       if (!res || !res.ok) {
-        if (res && res.error === "not_found") toast("这条已经不在回收站里了（可能已过期）");
-        else failToast(res, "恢复失败，请重试");
+        if (res && res.error === "not_found") toast(T("这条已经不在回收站里了（可能已过期）"));
+        else failToast(res, T("恢复失败，请重试"));
         return;
       }
-      const what = kind === "hl" ? "高亮" : "收藏";
-      toast(Number(res.restored) > 0 ? `已恢复 1 条${what} ✓` : `这条${what}已经在列表里了，未重复添加`);
+      if (Number(res.restored) > 0) {
+        toast(kind === "hl" ? T("已恢复 1 条高亮 ✓") : T("已恢复 1 条收藏 ✓"));
+      } else {
+        toast(kind === "hl" ? T("这条高亮已经在列表里了，未重复添加") : T("这条收藏已经在列表里了，未重复添加"));
+      }
     });
   });
 
@@ -744,26 +775,26 @@
       const res = await send({ type: "clipkeep:trash-restore", tid: entry.tid });
       if (!res || !res.ok) {
         await load();
-        if (res && res.error === "not_found") toast("该条目已过期，无法撤销");
-        else failToast(res, "撤销失败，请重试");
+        if (res && res.error === "not_found") toast(T("该条目已过期，无法撤销"));
+        else failToast(res, T("撤销失败，请重试"));
         return;
       }
       await load();
       // 批量删除共用一个撤销号，一次撤销还原整批，提示就要报出真实条数
       const n = Number(res.restored) || 0;
       const skipped = Number(res.existed) || 0;
-      if (skipped && n) toast(`已撤销 ${n} 条，另有 ${skipped} 条已存在未重复添加`);
-      else if (skipped) toast("该内容已存在，未重复添加");
-      else toast(n > 1 ? `已撤销 ${n} 条删除 ✓` : "已撤销删除 ✓");
+      if (skipped && n) toast(T("已撤销 {0} 条，另有 {1} 条已存在未重复添加", [n, skipped]));
+      else if (skipped) toast(T("该内容已存在，未重复添加"));
+      else toast(n > 1 ? T("已撤销 {0} 条删除 ✓", [n]) : T("已撤销删除 ✓"));
     });
   });
 
   $("btn-trash-clear").addEventListener("click", async () => {
-    if (!confirm("清空回收站？清空后无法再撤销。")) return;
+    if (!confirm(T("清空回收站？清空后无法再撤销。"))) return;
     const res = await send({ type: "clipkeep:trash-clear" });
     await load();
-    if (!res || !res.ok) return failToast(res, "清空回收站失败，请重试");
-    toast("回收站已清空");
+    if (!res || !res.ok) return failToast(res, T("清空回收站失败，请重试"));
+    toast(T("回收站已清空"));
   });
 
   /* ---------- 标签管理面板 ---------- */
@@ -780,7 +811,7 @@
     if (tagboxEl.hidden) return;
     const rows = tagCounts();
     if (!rows.length) {
-      tagboxEl.innerHTML = `<p class="tagbox-empty">还没有标签。给收藏「加标签」后就能在这里重命名、合并或删除。</p>`;
+      tagboxEl.innerHTML = `<p class="tagbox-empty">${T("还没有标签。给收藏「加标签」后就能在这里重命名、合并或删除。")}</p>`;
       return;
     }
     tagboxEl.innerHTML = rows
@@ -790,9 +821,9 @@
           <span class="tagname">#${esc(t)}</span>
           <span class="tagnum">${n}</span>
           <span class="tagops">
-            <button class="mini-btn" data-act="t-rename">重命名</button>
-            <button class="mini-btn" data-act="t-merge">合并到…</button>
-            <button class="mini-btn danger" data-act="t-del">删除</button>
+            <button class="mini-btn" data-act="t-rename">${T("重命名")}</button>
+            <button class="mini-btn" data-act="t-merge">${T("合并到…")}</button>
+            <button class="mini-btn danger" data-act="t-del">${T("删除")}</button>
           </span>
         </div>`
       )
@@ -801,10 +832,17 @@
 
   async function applyTagOp(from, to) {
     const res = await send({ type: "clipkeep:tag-op", payload: { from, to } });
-    if (!res || !res.ok) return toast("操作失败");
+    if (!res || !res.ok) return toast(T("操作失败"));
     if (activeTag === from) activeTag = to || "";
     await load();
-    toast(to ? `已更新 ${res.changed} 条（${to === from ? "无变化" : "#" + from + " → #" + to}）` : `已从 ${res.changed} 条中删除 #${from}`);
+    toast(
+      !to
+        ? T("已从 {0} 条中删除 #{1}", [res.changed, from])
+        // 合并到自己身上等于没动，说「已更新 0 条（无变化）」是把两句半话拼一起
+        : to === from
+          ? T("标签没有变化")
+          : T("已更新 {0} 条（#{1} → #{2}）", [res.changed, from, to])
+    );
   }
 
   tagboxEl.addEventListener("click", async (e) => {
@@ -815,14 +853,17 @@
     const from = row.dataset.tag;
     const act = btn.dataset.act;
     if (act === "t-rename") {
-      const to = prompt("把标签重命名为：", from);
+      const to = prompt(T("把标签重命名为："), from);
       if (to !== null && to.trim() && to.trim() !== from) await applyTagOp(from, to.trim());
     } else if (act === "t-merge") {
       const others = tagCounts().map(([t]) => t).filter((t) => t !== from);
-      const to = prompt("把 #" + from + " 合并到哪个标签？\n现有标签：" + (others.join("、") || "（无）"), others[0] || "");
+      const to = prompt(
+        T("把 #{0} 合并到哪个标签？\n现有标签：{1}", [from, others.join("、") || T("（无）")]),
+        others[0] || ""
+      );
       if (to !== null && to.trim() && to.trim() !== from) await applyTagOp(from, to.trim());
     } else if (act === "t-del") {
-      if (confirm(`从所有收藏中删除 #${from}？（不会删除内容本身）`)) await applyTagOp(from, "");
+      if (confirm(T("从所有收藏中删除 #{0}？（不会删除内容本身）", [from]))) await applyTagOp(from, "");
     }
   });
 
@@ -842,6 +883,13 @@
   $("set-heading").addEventListener("change", (e) => savePrefs("export", { heading: e.target.value }));
   $("set-source").addEventListener("change", (e) => savePrefs("export", { source: e.target.checked }));
   $("set-fm").addEventListener("change", (e) => savePrefs("export", { frontMatter: e.target.checked }));
+  // 语言存在偏好顶层（和 dark 同类）：先翻页再落盘，改完立刻见到英文，不用重开弹窗
+  $("pref-lang").addEventListener("change", async (e) => {
+    prefs = { ...prefs, lang: LANGS.indexOf(e.target.value) >= 0 ? e.target.value : "auto" };
+    applyLang();
+    await API.storage.local.set({ [PREFS_KEY]: prefs });
+    render();
+  });
 
   /* ---------- 回顾热力图 ---------- */
 
@@ -901,15 +949,15 @@
     const grid = cells
       .map((c) => {
         const cls = c.future ? " future" : c.n > 0 ? " clickable" : "";
-        const tip = `${c.key}${c.n ? ` · 回顾 ${c.n} 条，点开看明细` : ""}`;
+        const tip = c.key + (c.n ? T(" · 回顾 {0} 条，点开看明细", [c.n]) : "");
         return `<i class="lv${heatLvl(c.n)}${cls}" data-day="${c.key}" data-n="${c.n}" data-lvl="${heatLvl(c.n)}" title="${esc(tip)}"></i>`;
       })
       .join("");
     return `
       <div class="heat-wrap">
         <div class="heat-head">
-          <span class="heat-title">🔥 回顾打卡</span>
-          <span class="heat-stats" id="heat-stats">本周 ${week} · 连续 ${streak} 天 · 累计 ${total}</span>
+          <span class="heat-title">🔥 ${T("回顾打卡")}</span>
+          <span class="heat-stats" id="heat-stats">${T("本周 {0} · 连续 {1} 天 · 累计 {2}", [week, streak, total])}</span>
         </div>
         <div class="heat">${grid}</div>
         ${heatDayHtml()}
@@ -925,7 +973,7 @@
     const rows = listed
       .map((id) => {
         const it = items.find((x) => x && x.id === id);
-        const label = it ? String(it.text).slice(0, 60) : "（这条收藏已删除）";
+        const label = it ? String(it.text).slice(0, 60) : T("（这条收藏已删除）");
         return `<li>${it ? esc(label) : `<span class="muted">${esc(label)}</span>`}</li>`;
       })
       .join("");
@@ -933,16 +981,16 @@
     // 差额得从 n 里算，否则「复习 105 条」只列 100 行还不说明为什么
     const missing = a.n - listed.length;
     const overflow = missing > 0
-      ? `<p class="heat-day-note">仅显示最近 ${listed.length} 条，另有 ${missing} 条未列出。</p>`
+      ? `<p class="heat-day-note">${T("仅显示最近 {0} 条，另有 {1} 条未列出。", [listed.length, missing])}</p>`
       : "";
     const note = a.ids.length
       ? ""
-      : `<p class="heat-day-note">这条记录来自旧版本，只存了当天条数，没有复习明细。</p>`;
+      : `<p class="heat-day-note">${T("这条记录来自旧版本，只存了当天条数，没有复习明细。")}</p>`;
     return `
       <div class="heat-day" id="heat-day">
         <div class="heat-day-head">
-          <span>${esc(heatDay)} · 复习 ${a.n} 条</span>
-          <button class="mini-btn heat-day-close" data-act="heat-close">收起</button>
+          <span>${esc(heatDay)}${T(" · 复习 {0} 条", [a.n])}</span>
+          <button class="mini-btn heat-day-close" data-act="heat-close">${T("收起")}</button>
         </div>
         ${note}${a.ids.length ? `<ul class="heat-day-list">${rows}</ul>${overflow}` : ""}
       </div>`;
@@ -956,12 +1004,12 @@
     const queued = queue();
     const heat = heatHtml();
     if (!items.length) {
-      reviewEl.innerHTML = heat + `<div class="empty"><div class="empty-ico">🔁</div><p>还没有可回顾的内容</p><span>先去网页上划词收藏几条吧。</span></div>`;
+      reviewEl.innerHTML = heat + `<div class="empty"><div class="empty-ico">🔁</div><p>${T("还没有可回顾的内容")}</p><span>${T("先去网页上划词收藏几条吧。")}</span></div>`;
       return;
     }
     if (!queued.length) {
       const next = items.map((it) => ensureReview(it).due).sort((a, b) => a - b)[0];
-      reviewEl.innerHTML = heat + `<div class="empty done"><div class="empty-ico">🎉</div><p>今日回顾已完成</p><span>下一条将在 ${fmtDate(next)} 到期。明天再来 ~</span></div>`;
+      reviewEl.innerHTML = heat + `<div class="empty done"><div class="empty-ico">🎉</div><p>${T("今日回顾已完成")}</p><span>${T("下一条将在 {0} 到期。明天再来 ~", [fmtDate(next)])}</span></div>`;
       return;
     }
     const it = queued[0];
@@ -972,27 +1020,27 @@
     const link = it.url
       ? src
         ? `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(it.title || hostname(src))}</a>`
-        : `<span class="item-src" title="来源不是可点击的地址">${esc(it.title || it.url)}</span>`
+        : `<span class="item-src" title="${T("来源不是可点击的地址")}">${esc(it.title || it.url)}</span>`
       : "";
     const media = mediaOf(it);
     const kindTag = media
-      ? `<span class="badge-kind">${it.kind === "image" ? "图片" : "链接"}</span>` + mediaLinkHtml(it)
+      ? `<span class="badge-kind">${kindLabel(it.kind)}</span>` + mediaLinkHtml(it)
       : "";
-    const capNote = due.length > queued.length ? ` · 今日上限 ${cap} 条，剩余 ${due.length - queued.length} 条明天继续` : "";
+    const capNote = due.length > queued.length ? T(" · 今日上限 {0} 条，剩余 {1} 条明天继续", [cap, due.length - queued.length]) : "";
     reviewEl.innerHTML = heat + `
-      <div class="rev-progress">本组待回顾 ${queued.length} 条 · 记忆盒 ${r.box}/${INTERVALS.length - 1}${capNote}</div>
-      <p class="rev-keys">快捷键：<kbd>空格</kbd> 显示答案 · <kbd>1</kbd> 忘记 · <kbd>2</kbd> 记得 · <kbd>3</kbd> 简单</p>
+      <div class="rev-progress">${T("本组待回顾 {0} 条 · 记忆盒 {1}/{2}", [queued.length, r.box, INTERVALS.length - 1])}${capNote}</div>
+      <p class="rev-keys">${T("快捷键：")}<kbd>${T("空格")}</kbd> ${T("显示答案")} · <kbd>1</kbd> ${T("忘记")} · <kbd>2</kbd> ${T("记得")} · <kbd>3</kbd> ${T("简单")}</p>
       <div class="rev-card" data-id="${esc(it.id)}">
         <div class="rev-front">${esc(it.text)}</div>
         <div class="rev-back" hidden>
           ${it.note ? `<div class="rev-note">${esc(it.note)}</div>` : ""}
           <div class="rev-meta">${kindTag}${tags}${link}</div>
         </div>
-        <button class="rev-reveal" data-act="reveal">显示答案</button>
+        <button class="rev-reveal" data-act="reveal">${T("显示答案")}</button>
         <div class="rev-grade" hidden>
-          <button class="mini-btn again" data-act="grade" data-g="0">忘记</button>
-          <button class="mini-btn good" data-act="grade" data-g="1">记得</button>
-          <button class="mini-btn easy" data-act="grade" data-g="2">简单</button>
+          <button class="mini-btn again" data-act="grade" data-g="0">${T("忘记")}</button>
+          <button class="mini-btn good" data-act="grade" data-g="1">${T("记得")}</button>
+          <button class="mini-btn easy" data-act="grade" data-g="2">${T("简单")}</button>
         </div>
       </div>`;
   }
@@ -1031,8 +1079,8 @@
     } finally {
       grading = false; // 刷新完成后才交还点击权；卡片重渲染后按钮自然是可用状态
     }
-    if (!res || !res.ok) failToast(res, "打分保存失败，已还原，请重试");
-    else if (res.actFailed) toast("分数存好了，但今天的打卡记录没写进去（热力图会少这一条）");
+    if (!res || !res.ok) failToast(res, T("打分保存失败，已还原，请重试"));
+    else if (res.actFailed) toast(T("分数存好了，但今天的打卡记录没写进去（热力图会少这一条）"));
   }
 
   reviewEl.addEventListener("click", async (e) => {
@@ -1147,10 +1195,10 @@
     });
     const n = selected.size;
     batchEl.hidden = view !== "clips" || n === 0;
-    batchTextEl.textContent = `已选 ${n} 条`;
+    batchTextEl.textContent = T("已选 {0} 条", [n]);
     const arr = view === "clips" ? filtered() : [];
     const allOn = arr.length > 0 && arr.every((it) => selected.has(it.id));
-    $("btn-batch-all").textContent = allOn ? "取消全选" : "全选";
+    $("btn-batch-all").textContent = allOn ? T("取消全选") : T("全选");
   }
 
   function toggleSelect(id, row, box) {
@@ -1183,50 +1231,50 @@
     await withLock(async () => {
       const res = await send({ type: "clipkeep:delete-many", ids });
       await load(); // 以存储为准：删掉的 id 会在 renderBatchbar 里被剪掉
-      if (!res || !res.ok) return failToast(res, "批量删除失败，请重试");
+      if (!res || !res.ok) return failToast(res, T("批量删除失败，请重试"));
       // 一次能删的有上限，说清楚还剩多少，别让用户以为整批都干净了；
       // 回收站没写进去就没有「可撤销」可言，说了等于让人对着撤不回来的东西放心
-      const undo = res.trashed === false ? "，但回收站没写进去，撤销不了" : "，可撤销";
+      const undo = res.trashed === false ? T("，但回收站没写进去，撤销不了") : T("，可撤销");
       toast(res.limited
-        ? `已删除 ${res.removed} 条（单次上限）${undo}，剩下的请再选一批`
-        : `已删除 ${res.removed} 条${undo}`);
+        ? T("已删除 {0} 条（单次上限）{1}，剩下的请再选一批", [res.removed, undo])
+        : T("已删除 {0} 条{1}", [res.removed, undo]));
     });
   }
 
   async function batchTag() {
     const ids = [...selected];
     if (!ids.length) return;
-    const val = prompt(`给选中的 ${ids.length} 条追加标签（逗号分隔）：`, "");
+    const val = prompt(T("给选中的 {0} 条追加标签（逗号分隔）：", [ids.length]), "");
     if (val === null) return;
-    if (!val.trim()) return toast("没有输入标签");
+    if (!val.trim()) return toast(T("没有输入标签"));
     await withLock(async () => {
       const res = await send({ type: "clipkeep:tag-add-many", ids, tags: val });
       await load();
-      if (!res || !res.ok) return failToast(res, "批量加标签失败，请重试");
+      if (!res || !res.ok) return failToast(res, T("批量加标签失败，请重试"));
       const n = Number(res.changed) || 0;
       const drop = Number(res.dropped) || 0;
       // 一次处理不完就说清楚，别报「已给 N 条加标签」让用户以为整批都改完了
-      if (res.limited && !n) return toast(`一次最多处理 ${BATCH_MAX} 条，请分批再选`);
+      if (res.limited && !n) return toast(T("一次最多处理 {0} 条，请分批再选", [BATCH_MAX]));
       // 上限 12 个：一个都没加上时不能说「没有变化」（那是「本来就有」的意思），
       // 加上一部分也要说清有几个被挡在门外
       if (drop) {
         toast(n
-          ? `已给 ${n} 条加标签，另有 ${drop} 个标签超上限（每条最多 ${TAG_MAX} 个）没存进去`
-          : `${drop} 个标签超上限没存进去（每条最多 ${TAG_MAX} 个）`);
+          ? T("已给 {0} 条加标签，另有 {1} 个标签超上限（每条最多 {2} 个）没存进去", [n, drop, TAG_MAX])
+          : T("{0} 个标签超上限没存进去（每条最多 {1} 个）", [drop, TAG_MAX]));
         return;
       }
       toast(res.limited
-        ? `已给 ${n} 条加标签（单次上限 ${BATCH_MAX} 条），剩下的请再选一批`
-        : n ? `已给 ${n} 条加标签` : "标签没有变化");
+        ? T("已给 {0} 条加标签（单次上限 {1} 条），剩下的请再选一批", [n, BATCH_MAX])
+        : n ? T("已给 {0} 条加标签", [n]) : T("标签没有变化"));
     });
   }
 
   /** 批量导出按当前列表顺序，导出的就是用户看到的那一批 */
   function batchExport() {
     const arr = filtered().filter((it) => selected.has(it.id));
-    if (!arr.length) return toast("没有选中内容");
+    if (!arr.length) return toast(T("没有选中内容"));
     download(mdOf(arr), `clipkeep-${Date.now()}.md`);
-    toast(`已导出 ${arr.length} 条`);
+    toast(T("已导出 {0} 条", [arr.length]));
   }
 
   listEl.addEventListener("click", async (e) => {
@@ -1248,16 +1296,16 @@
         await load();
         // 三种结果三句话：真删了、这条早就不在了、写存储失败 / 后台失联
         if (res && res.ok) {
-          toast(res.trashed === false ? "已删除，但回收站没写进去，这条撤销不了" : "已删除，可撤销");
+          toast(res.trashed === false ? T("已删除，但回收站没写进去，这条撤销不了") : T("已删除，可撤销"));
         } else if (res && res.error === "not_found") {
-          toast("这条已经不在收藏里了");
+          toast(T("这条已经不在收藏里了"));
         } else {
-          failToast(res, "删除失败，请重试");
+          failToast(res, T("删除失败，请重试"));
         }
       });
     }
     else if (act === "tag") {
-      const val = prompt("输入标签，用逗号分隔：", (it.tags || []).join(","));
+      const val = prompt(T("输入标签，用逗号分隔："), (it.tags || []).join(","));
       if (val === null) return;
       await withLock(async () => {
         const res = await send({ type: "clipkeep:update", id, patch: { tags: val } });
@@ -1265,9 +1313,9 @@
         // 每条最多 TAG_MAX 个标签，超出的会被后台舍弃：只说「标签已更新」听不出少了几
         const drop = res && Number(res.tagDropped) || 0;
         if (res && res.ok) {
-          toast(drop ? `标签已更新，${drop} 个超上限（最多 ${TAG_MAX} 个）没进去` : "标签已更新");
+          toast(drop ? T("标签已更新，{0} 个超上限（最多 {1} 个）没进去", [drop, TAG_MAX]) : T("标签已更新"));
         } else {
-          failToast(res, "保存失败，请重试");
+          failToast(res, T("保存失败，请重试"));
         }
       });
     } else if (act === "export") {
@@ -1275,7 +1323,7 @@
     } else if (act === "more") {
       const box = row.querySelector(".item-text");
       const stillClamped = box.classList.toggle("is-clamped"); // 还折叠着就把按钮留作「展开」
-      btn.textContent = stillClamped ? "展开全文" : "收起";
+      btn.textContent = stillClamped ? T("展开全文") : T("收起");
     }
   });
 
@@ -1347,7 +1395,7 @@
       if (tabs[0]) await API.tabs.sendMessage(tabs[0].id, { type: "clipkeep:reader" });
       window.close();
     } catch (_) {
-      toast("当前页面不支持净化阅读");
+      toast(T("当前页面不支持净化阅读"));
     }
   }
 
@@ -1355,7 +1403,7 @@
 
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(() => toast("已复制 ✓"), () => fallbackCopy(text));
+      navigator.clipboard.writeText(text).then(() => toast(T("已复制 ✓")), () => fallbackCopy(text));
     } else {
       fallbackCopy(text);
     }
@@ -1364,7 +1412,7 @@
     const ta = document.createElement("textarea");
     ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); toast("已复制 ✓"); } catch (_) { toast("复制失败"); }
+    try { document.execCommand("copy"); toast(T("已复制 ✓")); } catch (_) { toast(T("复制失败")); }
     document.body.removeChild(ta);
   }
 
@@ -1372,10 +1420,10 @@
   function headingOf(it, i, tpl) {
     if (tpl === "date") return fmtDate(it.createdAt);
     if (tpl === "text") {
-      const first = String(it.text || "").split(/[\n。！？!?]/)[0].trim() || "未命名";
+      const first = String(it.text || "").split(/[\n。！？!?]/)[0].trim() || T("未命名");
       return first.length > 24 ? first.slice(0, 24) + "…" : first;
     }
-    const name = it.title || hostname(it.url) || "未命名";
+    const name = it.title || hostname(it.url) || T("未命名");
     return tpl === "title" ? name : `${i + 1}. ${name}`;
   }
 
@@ -1384,9 +1432,9 @@
     const lines = [];
     if (tpl.frontMatter) {
       // Obsidian 读文件顶部的 YAML 块作为笔记属性
-      lines.push("---", "title: ClipKeep 收藏", `exported: ${fmtDate(Date.now())}`, `count: ${arr.length}`, "---", "");
+      lines.push("---", T("title: ClipKeep 收藏"), `exported: ${fmtDate(Date.now())}`, `count: ${arr.length}`, "---", "");
     }
-    lines.push("# ClipKeep 收藏", "", `> 导出于 ${fmtDate(Date.now())} · 共 ${arr.length} 条`, "");
+    lines.push(T("# ClipKeep 收藏"), "", T("> 导出于 {0} · 共 {1} 条", [fmtDate(Date.now()), arr.length]), "");
     arr.forEach((it, i) => {
       lines.push(`## ${headingOf(it, i, tpl.heading)}`);
       if (it.tags && it.tags.length) lines.push("", "`" + it.tags.map((t) => "#" + t).join(" ") + "`");
@@ -1398,11 +1446,11 @@
         lines.push("", it.kind === "image" ? `![${label}](<${dest}>)` : `[${label}](<${dest}>)`);
       }
       lines.push("", "> " + String(it.text).replace(/\n/g, "\n> "));
-      if (it.note) lines.push("", "**备注：** " + it.note);
+      if (it.note) lines.push("", T("**备注：** ") + it.note);
       if (it.url && tpl.source) {
         const src = linkable(it.url);
         // 尖括号包住目的地：URL 里的括号（维基太常见）不会把链接写断
-        lines.push("", src ? `[来源](<${src.replace(/[<>\n\r]/g, " ")}>)` : `来源：${String(it.url).replace(/\s+/g, " ")}`);
+        lines.push("", src ? T("[来源](<{0}>)", [src.replace(/[<>\n\r]/g, " ")]) : T("来源：{0}", [String(it.url).replace(/\s+/g, " ")]));
       }
       lines.push("", `*${fmtDate(it.createdAt)}*`, "", "---", "");
     });
@@ -1411,9 +1459,9 @@
 
   function exportMd() {
     const arr = view === "review" ? items : filtered();
-    if (!arr.length) return toast("没有可导出的内容");
+    if (!arr.length) return toast(T("没有可导出的内容"));
     download(mdOf(arr), `clipkeep-${Date.now()}.md`);
-    toast(`已导出 ${arr.length} 条`);
+    toast(T("已导出 {0} 条", [arr.length]));
   }
 
   function download(content, filename, type) {
@@ -1436,9 +1484,9 @@
       items: Array.isArray(obj[STORAGE_KEY]) ? obj[STORAGE_KEY] : [],
       highlights: Array.isArray(obj[HL_KEY]) ? obj[HL_KEY] : [],
     };
-    if (!data.items.length && !data.highlights.length) return toast("没有可备份的数据");
+    if (!data.items.length && !data.highlights.length) return toast(T("没有可备份的数据"));
     download(JSON.stringify(data, null, 2), `clipkeep-backup-${Date.now()}.json`, "application/json");
-    toast(`已备份 ${data.items.length} 条收藏 · ${data.highlights.length} 条高亮`);
+    toast(T("已备份 {0} 条收藏 · {1} 条高亮", [data.items.length, data.highlights.length]));
   }
 
   const SAFE_ID = /^[\w-]{1,64}$/;
@@ -1501,11 +1549,11 @@
     try {
       data = JSON.parse(await file.text());
     } catch (_) {
-      return toast("恢复失败：文件解析错误");
+      return toast(T("恢复失败：文件解析错误"));
     }
     const inItems = Array.isArray(data.items) ? data.items.map(normalizeItem).filter(Boolean) : [];
     const inHl = Array.isArray(data.highlights) ? data.highlights.map(normalizeHighlight).filter(Boolean) : [];
-    if (!inItems.length && !inHl.length) return toast("备份文件为空或格式不符");
+    if (!inItems.length && !inHl.length) return toast(T("备份文件为空或格式不符"));
 
     const obj = await API.storage.local.get([STORAGE_KEY, HL_KEY]);
     const takenAt = Date.now(); // 快照读取时刻：比这更新的记录没出现在差异里，不能被覆盖抹掉
@@ -1529,26 +1577,26 @@
       takenAt,
     };
     if (!plan.addItems.length && !plan.addHl.length && plan.sameItems === curItems.length) {
-      return toast("备份与本地一致，无需恢复");
+      return toast(T("备份与本地一致，无需恢复"));
     }
     pendingRestore = plan;
     openRestoreModal(plan);
   }
 
   function openRestoreModal(p) {
-    $("modal-title").textContent = "恢复备份 · 差异确认";
+    $("modal-title").textContent = T("恢复备份 · 差异确认");
     const hlNote = p.inHl.length === 0 && p.curHl.length
-      ? `<li><b class="same">备份未含高亮</b>，覆盖会保留本地 ${p.curHl.length} 条高亮 / 批注</li>`
+      ? `<li><b class="same">${T("备份未含高亮")}</b>${T("，覆盖会保留本地 {0} 条高亮 / 批注", [p.curHl.length])}</li>`
       : "";
     $("modal-body").innerHTML = `
       <ul class="diff">
-        <li><b class="add">+${p.addItems.length}</b> 条备份里的新收藏</li>
-        <li><b class="same">${p.sameItems}</b> 条两边已有（保留本地版本）</li>
-        <li><b class="local">${p.localOnly.length}</b> 条仅存在于本地${p.localOnly.length ? "（覆盖会丢失）" : ""}</li>
-        <li><b class="add">+${p.addHl.length}</b> 条新高亮 · ${p.sameHl} 条已存在</li>
+        <li><b class="add">+${p.addItems.length}</b> ${T("条备份里的新收藏")}</li>
+        <li><b class="same">${p.sameItems}</b> ${T("条两边已有（保留本地版本）")}</li>
+        <li><b class="local">${p.localOnly.length}</b> ${T("条仅存在于本地")}${p.localOnly.length ? T("（覆盖会丢失）") : ""}</li>
+        <li><b class="add">+${p.addHl.length}</b> ${T("条新高亮")} · ${p.sameHl} ${T("条已存在")}</li>
         ${hlNote}
       </ul>
-      <p class="diff-hint">合并：只补新内容，不动本地；覆盖本地：以备份为准（备份里没有的类别保留本地）。</p>`;
+      <p class="diff-hint">${T("合并：只补新内容，不动本地；覆盖本地：以备份为准（备份里没有的类别保留本地）。")}</p>`;
     modalEl.hidden = false;
   }
 
@@ -1560,7 +1608,7 @@
   /** 正文超过 MAX_TEXT 会被后台砍短：恢复类提示要顺口带一句，别让用户以为备份原样回来了 */
   function truncNote(n) {
     const k = Number(n) || 0;
-    return k ? `（${k} 条正文过长，已截断到 ${MAX_TEXT} 字）` : "";
+    return k ? T("（{0} 条正文过长，已截断到 {1} 字）", [k, MAX_TEXT]) : "";
   }
 
   /** 两类内容都交给后台串行写；takenAt 让「覆盖」只作用于弹窗看到的那份快照 */
@@ -1586,7 +1634,7 @@
     const p = pendingRestore;
     // 收藏交给 background 现读现写：弹窗开着时别的标签页存的内容不会被旧快照抹掉
     const res = await send({ type: "clipkeep:merge", payload: { items: p.inItems } });
-    if (!res || !res.ok) return failToast(res, "合并失败，请重试");
+    if (!res || !res.ok) return failToast(res, T("合并失败，请重试"));
     // 高亮同理：逐条走后台 upsert，不再拿旧快照整表回写
     let hlAdded = 0;
     for (const h of p.addHl) {
@@ -1595,12 +1643,12 @@
     }
     closeRestoreModal();
     await load();
-    toast(`已合并：新增 ${res.added} 收藏 · ${hlAdded} 高亮${truncNote(res.truncated)}`);
+    toast(T("已合并：新增 {0} 收藏 · {1} 高亮{2}", [res.added, hlAdded, truncNote(res.truncated)]));
   });
   $("modal-alt").addEventListener("click", async () => {
     if (!pendingRestore) return;
     const p = pendingRestore;
-    if (p.localOnly.length && !confirm(`备份里没有这 ${p.localOnly.length} 条本地内容，覆盖后将丢失。继续？`)) return;
+    if (p.localOnly.length && !confirm(T("备份里没有这 {0} 条本地内容，覆盖后将丢失。继续？", [p.localOnly.length]))) return;
     // 备份没提到的类别保留本地，避免「覆盖」把高亮批注悄悄清空
     const itemsArr = (p.inItems.length ? p.inItems : p.curItems).slice().sort((a, b) => b.createdAt - a.createdAt);
     const hlArr = p.inHl.length ? p.inHl : p.curHl;
@@ -1609,11 +1657,11 @@
     await load();
     if (!written.itemsOk || !written.hlOk) {
       // 后台没写成功就别报「已覆盖」：说清楚哪一类没进去，本地内容还是原样
-      const bad = [!written.itemsOk ? "收藏" : "", !written.hlOk ? "高亮" : ""].filter(Boolean).join(" / ");
-      toast(`覆盖失败：${bad}没有写入成功，本地内容未变，请重试`);
+      const bad = [!written.itemsOk ? T("收藏") : "", !written.hlOk ? T("高亮") : ""].filter(Boolean).join(" / ");
+      toast(T("覆盖失败：{0}没有写入成功，本地内容未变，请重试", [bad]));
       return;
     }
-    toast(`已用备份覆盖：共 ${written.items} 收藏 · ${written.hl} 高亮${truncNote(written.truncated)}`);
+    toast(T("已用备份覆盖：共 {0} 收藏 · {1} 高亮{2}", [written.items, written.hl, truncNote(written.truncated)]));
   });
 
   $("btn-backup").addEventListener("click", backup);
@@ -1625,15 +1673,15 @@
   });
 
   $("btn-clear").addEventListener("click", async () => {
-    if (!items.length) return toast("已经是空的了");
-    if (confirm("确定清空全部收藏？此操作不可恢复（高亮批注不受影响）。")) {
+    if (!items.length) return toast(T("已经是空的了"));
+    if (confirm(T("确定清空全部收藏？此操作不可恢复（高亮批注不受影响）。"))) {
       // 说了「不可恢复」就要真的不可恢复，也说了高亮批注不受影响：
       // 只关收藏这一类的撤销后门，别把高亮的记录一起毁掉
       const res = await send({ type: "clipkeep:clear" });
-      if (!res || !res.ok) { await load(); return failToast(res, "清空失败，收藏还在，请重试"); }
+      if (!res || !res.ok) { await load(); return failToast(res, T("清空失败，收藏还在，请重试")); }
       const t = await send({ type: "clipkeep:trash-clear", kind: "clip" });
       await load();
-      toast(t && t.ok ? "已清空" : "收藏已清空，但收藏的撤销记录没关掉，还能撤销");
+      toast(t && t.ok ? T("已清空") : T("收藏已清空，但收藏的撤销记录没关掉，还能撤销"));
     }
   });
 
@@ -1645,5 +1693,6 @@
     });
   }
 
+  applyLang(); // 外壳先按浏览器语言翻好：等存储读完才翻，英文界面会先闪一屏中文
   load();
 })();

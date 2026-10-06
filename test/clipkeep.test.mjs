@@ -29,7 +29,8 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------- 共享存储 + background 消息路由 ---------------- */
 
-function makeBackend() {
+function makeBackend(opts) {
+  const uiLanguage = (opts && opts.uiLanguage) || "zh-CN"; // jsdom 默认 en-US，会把中文断言整体翻成英文
   const store = { clipkeep_items: [], clipkeep_highlights: [], clipkeep_prefs: {} };
   const listeners = [];
   const hlListeners = [];
@@ -89,10 +90,13 @@ function makeBackend() {
       create() {},
     },
     scripting: { executeScript: async () => {} },
+    i18n: { getUILanguage: () => uiLanguage },
   };
 
   // 在沙箱里跑真实的 background.js，注册消息路由与命令监听
   const ctx = vm.createContext({ chrome, console, setTimeout, Date, Math, JSON, String, Number, Array, Object, Promise, URL });
+  // service worker 里 background.js 用 importScripts 拿文案层，沙箱里等价地按文件名读真实文件
+  ctx.importScripts = (...files) => files.forEach((f) => vm.runInContext(src(f), ctx));
   vm.runInContext(src("background.js"), ctx);
 
   const send = async (msg, from) => {
@@ -500,9 +504,10 @@ async function testPopup() {
 
 /* ---------------- 2b. 恢复导入的安全与数据完整性 ---------------- */
 
-async function mountPopup(seed) {
-  const be = makeBackend();
+async function mountPopup(seed, opts) {
+  const be = makeBackend(opts);
   Object.assign(be.store, seed || {});
+  const uiLanguage = (opts && opts.uiLanguage) || "zh-CN";
   let downloaded = null;
   const dom = new JSDOM(src("popup.html"), {
     runScripts: "outside-only",
@@ -515,6 +520,8 @@ async function mountPopup(seed) {
   w.URL.revokeObjectURL = () => {};
   w.prompt = () => "";
   w.confirm = () => true;
+  Object.defineProperty(w.navigator, "language", { value: uiLanguage, configurable: true });
+  w.eval(src("i18n.js"));
   w.eval(src("popup.js"));
   await tick(10);
   const $ = (id) => w.document.getElementById(id);
@@ -1084,9 +1091,10 @@ async function testContent() {
 
 /* ---------------- 3b. 高亮与存储保持一致 ---------------- */
 
-function mountContent(pageUrl, highlights, htmlBody) {
-  const be = makeBackend();
+function mountContent(pageUrl, highlights, htmlBody, opts) {
+  const be = makeBackend(opts);
   be.store.clipkeep_highlights = highlights;
+  if (opts && opts.lang) be.store.clipkeep_prefs = { lang: opts.lang };
   const dom = new JSDOM(
     `<!DOCTYPE html><html><body><article>${htmlBody}</article></body></html>`,
     { runScripts: "outside-only", url: pageUrl }
@@ -1095,6 +1103,8 @@ function mountContent(pageUrl, highlights, htmlBody) {
   w.Range.prototype.getBoundingClientRect = () => ({ top: 100, bottom: 122, left: 120, right: 300, width: 180, height: 22, x: 120, y: 100 });
   w.chrome = be.chrome;
   w.prompt = () => "";
+  Object.defineProperty(w.navigator, "language", { value: (opts && opts.uiLanguage) || "zh-CN", configurable: true });
+  w.eval(src("i18n.js"));
   w.eval(src("content.js"));
   const lastListener = () => be.listeners[be.listeners.length - 1]; // makeBackend 先注册后台，再注册本页 content script
   return {
@@ -4397,6 +4407,266 @@ async function testV111FlatAnchor() {
 }
 
 
+/* ---------------- 3v. v1.11 国际化文案层 ---------------- */
+
+// 在裸沙箱里加载文案层本身（不依赖 DOM / chrome），用来直接问 T
+function loadI18n() {
+  const ctx = { console, Object, Array, String, Number, Boolean, RegExp, JSON, Math, Date, isNaN, parseInt };
+  vm.createContext(ctx);
+  vm.runInContext(src("i18n.js"), ctx);
+  return ctx.ClipKeepI18N;
+}
+
+/** 语言自称名（endonym）：英文界面上「中文」仍然写「中文」，各语言都这么列，所以它不进词典、也不算中文残留 */
+const ENDONYMS = ["中文"];
+
+const HAN = /[\u4e00-\u9fff]/;
+const LIT_BODY = String.raw`"((?:[^"\\\n]|\\.)*)"`;
+const unescLit = (b) => b.replace(/\\(u[0-9a-fA-F]{4}|.)/g, (m, g) =>
+  g[0] === "u" ? String.fromCharCode(parseInt(g.slice(1), 16)) : g === "n" ? "\n" : g === "t" ? "\t" : g === "r" ? "\r" : g);
+const decodeEnt = (s) => s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&#(\d+);/g, (m, d) => String.fromCharCode(Number(d)));
+
+/**
+ * 扫出全部 msgid，三条来源缺一不可：
+ *  1) T("…") 直接调用的字面量；
+ *  2) msgid 常量（const X = "…" / { key: "…" }）——高亮颜色名、失联提示这类必须先存中文原文，
+ *     模块加载时就翻译会把语言冻在默认值上；
+ *  3) popup.html 的 data-i18n* 属性和静态文本节点。
+ * 只扫 T() 调用会漏掉 2 和 3，而这两类恰恰最容易忘。
+ */
+function collectMsgids() {
+  const ids = new Set();
+  const js = (txt) => {
+    for (const m of txt.matchAll(new RegExp(String.raw`\bT\(\s*` + LIT_BODY, "g")))
+      if (HAN.test(m[1])) ids.add(unescLit(m[1]));
+    for (const m of txt.matchAll(new RegExp(String.raw`(?:^|[={,\s])[\w$]+\s*[:=]\s*` + LIT_BODY + String.raw`\s*(?:[,;}]|$)`, "gm")))
+      if (HAN.test(m[1])) ids.add(unescLit(m[1]));
+  };
+  ["popup.js", "content.js", "background.js"].forEach((f) => js(src(f)));
+  const html = src("popup.html");
+  for (const m of html.matchAll(/data-i18n(?:-title|-placeholder|-aria)?="([^"]*)"/g))
+    if (HAN.test(m[1])) ids.add(decodeEnt(m[1]));
+  for (const m of html.matchAll(/>([^<>]*[\u4e00-\u9fff][^<>]*)</g)) {
+    const t = m[1].trim();
+    if (t) ids.add(decodeEnt(t));
+  }
+  return [...ids].filter((s) => !ENDONYMS.includes(s));
+}
+
+/** 占位符集合：msgid 和译文必须一一对应，少一个 {1} 就会把参数吞掉 */
+const placeholders = (s) => (String(s).match(/\{\d+\}/g) || []).sort().join(",");
+
+async function testV111I18n() {
+  console.log("\n[3v] 国际化文案层：msgid 就是中文原文 / 英文词典 / 语言偏好");
+  const CJK = /[\u4e00-\u9fff]/;
+
+  /* 1. 文案层本身：中文原样返回、占位替换、缺词条退回中文 */
+  {
+    const I = loadI18n();
+    ok("文案层挂在全局", !!I && typeof I.T === "function");
+    eq("中文界面原样返回", I.T("搜索收藏内容…"), "搜索收藏内容…");
+    eq("占位符按参数替换", I.T("已选 {0} 条", [3]), "已选 3 条");
+    eq("缺参数时占位符原样留着，不吐 undefined", I.T("已选 {0} 条"), "已选 {0} 条");
+    I.setLang("en");
+    ok("英文界面有译文", I.T("搜索收藏内容…") !== "搜索收藏内容…" && !CJK.test(I.T("搜索收藏内容…")),
+      I.T("搜索收藏内容…"));
+    eq("英文界面同样做占位替换", /\{\d\}/.test(I.T("已选 {0} 条", [3])), false);
+    eq("词典里没有的文案退回中文（宁可混排也不要空白）", I.T("这句没有译文的测试文案"), "这句没有译文的测试文案");
+    ok("退回的条目会被记下来，覆盖率测试能抓到", I.missing().includes("这句没有译文的测试文案"),
+      JSON.stringify(I.missing().slice(-3)));
+    I.setLang("zh");
+    eq("切回中文立刻生效", I.T("搜索收藏内容…"), "搜索收藏内容…");
+  }
+
+  /* 2. 词典覆盖率：源码里每一句中文文案都必须在英文词典里有对应条目 */
+  {
+    const I = loadI18n();
+    const ids = collectMsgids();
+    ok("扫到了待译文案", ids.length > 150, `只有 ${ids.length} 条`);
+    const en = I.EN;
+    const holes = ids.filter((k) => !String(en[k] || "").trim() || CJK.test(String(en[k])));
+    ok(`英文词典覆盖全部 ${ids.length} 条文案`, holes.length === 0,
+      `缺 ${holes.length} 条：${JSON.stringify(holes.slice(0, 8))}`);
+    const dupes = Object.keys(en).filter((k) => !ids.includes(k));
+    ok("词典里没有多余的死条目", dupes.length === 0, JSON.stringify(dupes.slice(0, 8)));
+    const mismatched = ids.filter((k) => String(en[k] || "") && placeholders(k) !== placeholders(en[k]));
+    ok("每条译文的占位符和 msgid 一一对应", mismatched.length === 0,
+      JSON.stringify(mismatched.slice(0, 5).map((k) => [k, en[k]])));
+  }
+
+  /* 3. 静态外壳：popup.html 的中文都挂在 data-i18n 上，英文界面整壳无中文 */
+  {
+    const p = await mountPopup({ clipkeep_prefs: { lang: "en" } });
+    await tick(20);
+    // 逐个文本节点问「你所属的元素挂 data-i18n 了吗」：比整行正则可靠——
+    // 正则要么把 <span data-i18n="📌 收藏">📌 收藏</span> 这种正常写法误判成漏标，要么放过真正的裸中文。
+    const rawDoc = new JSDOM(src("popup.html")).window.document;
+    const untagged = [];
+    rawDoc.querySelectorAll("*").forEach((el) => {
+      [...el.childNodes].forEach((n) => {
+        if (n.nodeType !== 3) return;
+        const t = n.textContent.trim();
+        if (!CJK.test(t) || ENDONYMS.includes(t)) return;
+        if (!el.hasAttribute("data-i18n")) untagged.push(`${el.tagName.toLowerCase()} › ${t}`);
+      });
+    });
+    ok("popup.html 的静态文案都带 data-i18n", untagged.length === 0, JSON.stringify(untagged.slice(0, 6)));
+    // 语言自称名不参与「无中文」判定：英文界面里 Chinese 这一项照样写「中文」
+    p.w.document.querySelector('#pref-lang option[value="zh"]').remove();
+    const shell = [p.$("btn-keys"), p.$("btn-reader"), p.$("btn-settings"), p.$("btn-theme"), p.$("btn-export")]
+      .map((el) => `${el.textContent}|${el.title}`).join(" ");
+    ok("图标按钮的提示已是英文", !CJK.test(shell), shell);
+    ok("标签页标题已是英文", !CJK.test(p.q(".tabs").textContent), p.q(".tabs").textContent);
+    ok("搜索框占位符已是英文", !CJK.test(p.$("search").placeholder), p.$("search").placeholder);
+    ok("空状态也是英文", !CJK.test(p.q(".empty").textContent), p.q(".empty").textContent);
+    ok("整个弹窗壳子没有中文残留", !CJK.test(p.w.document.body.textContent),
+      (p.w.document.body.textContent || "").replace(/\s+/g, " ").slice(0, 160));
+    eq("文档语言标成 en", p.w.document.documentElement.lang, "en");
+  }
+
+  /* 4. 中文仍然是默认界面：没设过偏好时一切照旧 */
+  {
+    const p = await mountPopup();
+    await tick(20);
+    eq("默认按浏览器界面语言走（这里是中文）", p.w.ClipKeepI18N.lang(), "zh");
+    ok("搜索框占位符还是中文", p.$("search").placeholder === "搜索收藏内容…", p.$("search").placeholder);
+    ok("空状态还是中文", /还没有收藏/.test(p.q(".empty").textContent), p.q(".empty").textContent);
+  }
+
+  /* 5. auto：跟随浏览器界面语言，英文浏览器开箱就是英文 */
+  {
+    const p = await mountPopup({ clipkeep_prefs: { lang: "auto" } }, { uiLanguage: "en-US" });
+    await tick(20);
+    eq("auto + 英文界面 → 英文", p.w.ClipKeepI18N.lang(), "en");
+    ok("标签页已是英文", !CJK.test(p.q(".tabs").textContent), p.q(".tabs").textContent);
+    const c = await mountPopup({ clipkeep_prefs: { lang: "auto" } }, { uiLanguage: "zh-TW" });
+    await tick(20);
+    eq("auto + 中文界面（含繁体的区域标记）→ 中文", c.w.ClipKeepI18N.lang(), "zh");
+    const e = await mountPopup({ clipkeep_prefs: { lang: "zh" } }, { uiLanguage: "en-US" });
+    await tick(20);
+    eq("用户显式选了中文，浏览器语言不再作数", e.w.ClipKeepI18N.lang(), "zh");
+  }
+
+  /* 6. 设置里能改语言：选 English 立刻生效并落盘，重开弹窗仍是英文 */
+  {
+    const p = await mountPopup();
+    await tick(20);
+    await p.click(p.$("btn-settings"));
+    const sel = p.$("pref-lang");
+    ok("设置面板里有语言选择", !!sel, "没有 #pref-lang");
+    sel.value = "en";
+    await p.fire(sel, "change");
+    await tick(30);
+    eq("偏好已落盘", p.store.clipkeep_prefs.lang, "en");
+    ok("界面立刻切到英文", !CJK.test(p.q(".tabs").textContent), p.q(".tabs").textContent);
+    const again = await mountPopup(p.store);
+    await tick(20);
+    ok("重开弹窗仍然是英文", !CJK.test(again.q(".tabs").textContent), again.q(".tabs").textContent);
+  }
+
+  /* 7. 内容脚本：浮动条、卡片、Toast 都走文案层 */
+  {
+    const url = "http://localhost/i18n7";
+    const c = mountContent(url, [], `<p>量子比特可以同时处于两种状态，这是并行性的来源。</p>`, { lang: "en" });
+    const p = c.w.document.querySelector("p");
+    const sel = c.w.getSelection();
+    const r = c.w.document.createRange();
+    r.setStart(p.firstChild, 0);
+    r.setEnd(p.firstChild, 4);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    const bar = c.w.document.querySelector(".clipkeep-toolbar");
+    ok("英文界面下浮动条也出来了", !!bar);
+    // 宿主页面的 <html lang> 一个字都不动：那是人家的文档，改了整个页面的朗读和字体都跟着错
+    eq("内容脚本不改宿主页面语言", c.w.document.documentElement.getAttribute("lang"), null);
+    const barText = bar ? bar.textContent + " " + [...bar.querySelectorAll("button")].map((b) => b.title).join(" ") : "";
+    ok("浮动条没有中文", !!bar && !CJK.test(barText), barText);
+    bar.querySelector(".clipkeep-btn-save").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(20);
+    const card = c.w.document.getElementById("clipkeep-card");
+    // 卡片里那块引用是用户选中的原文，中文内容当然照原样留着；只查界面文案
+    const chromeText = [
+      ...card.querySelectorAll(".clipkeep-card-head, .clipkeep-btn"),
+    ].map((el) => el.textContent).join(" ") + " " +
+      [...card.querySelectorAll("input, textarea")].map((i) => i.placeholder).join(" ");
+    ok("收藏卡片的界面文案没有中文", !CJK.test(chromeText), chromeText.replace(/\s+/g, " ").slice(0, 120));
+    ok("卡片引用的原文一字不动", /量子比特/.test(card.querySelector(".clipkeep-quote").textContent),
+      card.querySelector(".clipkeep-quote").textContent);
+    card.querySelector(".clipkeep-btn-confirm").dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(40);
+    ok("保存成功的提示也是英文", !CJK.test(c.toastText()), c.toastText());
+    eq("收藏仍然正常落盘", (c.store.clipkeep_items || []).length, 1);
+  }
+
+  /* 8. 右键菜单跟着语言偏好走：装扩展时按当前语言建，改了偏好要重建 */
+  {
+    const be = makeBackend({ uiLanguage: "en-US" });
+    be.store.clipkeep_prefs = { lang: "auto" };
+    await be.fireInstalled("install");
+    await tick(20);
+    const titles = be.menuOps.created.map((m) => m.title).join(" | ");
+    ok("英文界面下右键菜单是英文", !!titles && !CJK.test(titles), titles);
+    const firstRemoveAll = be.menuOps.removeAll;
+    await be.chrome.storage.local.set({ clipkeep_prefs: { lang: "zh" } });
+    await tick(30);
+    ok("改语言后菜单重建过", be.menuOps.removeAll > firstRemoveAll, `${be.menuOps.removeAll}`);
+    const zhTitles = be.menuOps.created.slice(-4).map((m) => m.title).join(" | ");
+    ok("重建后回到中文菜单", /收藏|净化/.test(zhTitles), zhTitles);
+  }
+
+  /* 9. 后台的失败提示也是文案层出来的：不能一半英文一半中文 */
+  {
+    const be = makeBackend({ uiLanguage: "en-US" });
+    be.store.clipkeep_prefs = { lang: "en" };
+    be.store.__failNextSet = true;
+    const r = await be.send({ type: "clipkeep:add", payload: { text: "x", url: "http://a", title: "T" } });
+    await tick(20);
+    ok("存储失败提示按语言出", !!r.error && !CJK.test(r.error), r.error);
+  }
+
+  /* 10. 导出与备份里的固定字样也走文案层（用户拿到的 Markdown 跟着界面语言） */
+  {
+    const p = await mountPopup({
+      clipkeep_prefs: { lang: "en" },
+      clipkeep_items: [{ id: "e1", text: "Alpha qubit", note: "keep", tags: ["quantum"], url: "http://a/1", title: "Src", createdAt: 1 }],
+    }, { uiLanguage: "en-US" });
+    await tick(20);
+    p.click(p.$("btn-export"));
+    await tick(40);
+    const md = p.getDownloaded() || "";
+    ok("导出的 Markdown 抬头是英文", !!md && !CJK.test(md), md.replace(/\s+/g, " ").slice(0, 140));
+    ok("内容一字不少", /Alpha qubit/.test(md) && /#quantum/.test(md), md.slice(0, 140));
+  }
+
+  /* 11. 文案层没加载也不能崩：T 退化成原样返回（老的抓帧桩、直接 eval 的页面） */
+  {
+    const be = makeBackend();
+    const dom = new JSDOM(`<!DOCTYPE html><html><body><p>量子比特可以叠加</p></body></html>`,
+      { runScripts: "outside-only", url: "http://localhost/i18n11" });
+    const w = dom.window;
+    w.Range.prototype.getBoundingClientRect = () => ({ top: 100, bottom: 122, left: 120, right: 300, width: 180, height: 22, x: 120, y: 100 });
+    w.chrome = be.chrome;
+    w.eval(src("content.js"));
+    await tick(30);
+    const p0 = w.document.querySelector("p");
+    const sel = w.getSelection();
+    const r = w.document.createRange();
+    r.setStart(p0.firstChild, 0);
+    r.setEnd(p0.firstChild, 4);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    w.document.dispatchEvent(new w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(30);
+    ok("没有 i18n.js 时浮动条照常工作", !!w.document.querySelector(".clipkeep-toolbar"));
+    ok("没有 i18n.js 时界面退回中文而不是报错", /收藏|高亮|批注/.test(w.document.querySelector(".clipkeep-toolbar").textContent),
+      w.document.querySelector(".clipkeep-toolbar").textContent);
+  }
+}
+
+
 /* ---------------- 4. 清单一致性 ---------------- */
 
 async function testManifests() {
@@ -4468,7 +4738,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testManifests];
   for (const s of suites) {
     try {
       await s();

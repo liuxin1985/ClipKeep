@@ -46,6 +46,7 @@
         "http://*/*"
       ],
       "js": [
+        "i18n.js",
         "content.js"
       ],
       "css": [
