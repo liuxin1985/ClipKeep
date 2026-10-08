@@ -5437,6 +5437,512 @@ async function testV112Audit() {
   }
 }
 
+/* ---------------- v1.13：复习卡片里直接改标签与备注 ---------------- */
+
+async function testV113ReviewEdit() {
+  console.log("\n[3a13] v1.13 复习：改标签与备注不用切回列表");
+  const CJK = /[一-鿿]/;
+  const now = Date.now();
+  const mk = (id, tags, note) => ({
+    id, text: `正文-${id}`, note: note || "", tags: tags || [],
+    url: "http://q.dev/a", title: `标题-${id}`, createdAt: now,
+    review: { box: 1, due: now - 1000, seen: 1 },
+  });
+
+  /** 打开回顾并展开答案：改标签这个动作只发生在「看完答案、想顺手整理」那一刻 */
+  const open = async (over, opts, reveal = true) => {
+    const p = await mountPopup({
+      clipkeep_items: [mk("r1", ["量子", "笔记"], "旧备注"), mk("r2", ["历史"])],
+      ...(over || {}),
+    }, opts);
+    await p.click(p.q('.tab[data-view="review"]'));
+    if (reveal) await p.click(p.q('[data-act="reveal"]'));
+    return p;
+  };
+  const cardId = (p) => ((p.q(".rev-card") || {}).dataset || {}).id || "";
+  /** 入口还没做出来时也要把整组断言跑完：缺一个元素就崩掉，看不到后面几条的失败原因 */
+  const tap = async (p, sel) => {
+    const el = p.q(sel);
+    if (!el) {
+      ok(`有 ${sel}`, false, "这个入口还没做出来，依赖它的步骤只能跳过");
+      return false;
+    }
+    await p.click(el);
+    return true;
+  };
+  const row = (p, id) => p.store.clipkeep_items.find((x) => x.id === id) || {};
+  const toastText = (p) => ((p.$("toast") || {}).textContent || "").replace(/\s+/g, " ");
+  /** 写完还要 load() 回读一次才出提示：单靠 click 里那 10ms 不够，读到的上一条提示会假绿 */
+  const flush = async () => { for (let i = 0; i < 5; i++) await tick(10); };
+  const keyOn = async (el, key, mod) => {
+    const w = el.ownerDocument.defaultView;
+    el.dispatchEvent(new w.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...(mod || {}) }));
+    await tick(20);
+  };
+  /** 拦下写请求计数：重复保存、取消保存这两条都要知道「到底发了几条 clipkeep:update」 */
+  const spyWrites = (p, gate) => {
+    const seen = [];
+    const raw = p.be.chrome.runtime.sendMessage;
+    p.be.chrome.runtime.sendMessage = function (msg, cb) {
+      if (msg && msg.type === "clipkeep:update") {
+        seen.push(msg);
+        const go = gate ? gate.then(() => raw(msg, cb)) : raw(msg, cb);
+        return go;
+      }
+      return raw(msg, cb);
+    };
+    return seen;
+  };
+
+  /* 1. 入口只属于答案区：没翻答案就没有编辑，复习不该被输入框打扰 */
+  {
+    const p = await open(null, null, false);
+    const back = p.q(".rev-back");
+    const entry = p.q('[data-act="rev-tags"]');
+    // jsdom 没有排版，「看不见」这件事只能按 hidden 属性 + CSS 规则两头的契约来断言
+    ok("没展开答案时编辑入口不可见",
+      !!back && back.hidden === true && !!entry && entry.closest(".rev-back") === back,
+      "编辑按钮没藏在答案区里");
+    ok("hidden 的答案区真的不显示", /\.rev-back\[hidden\][^{]*\{[^}]*display:\s*none/.test(src("popup.css")),
+      "只挂 hidden 属性没有对应 CSS，等于没藏");
+    await p.click(p.q('[data-act="reveal"]'));
+    ok("展开后有改标签", !!p.q('.rev-back [data-act="rev-tags"]'), p.$("review").innerHTML.slice(0, 200));
+    ok("展开后有改备注", !!p.q('.rev-back [data-act="rev-note"]'));
+  }
+
+  /* 2. 点「改标签」→ 预填当前标签的单行输入框，Enter 保存 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    ok("出现标签输入框", !!inp, "点完按钮没有换出输入框");
+    if (inp) {
+      ok("输入框预填当前标签", /量子/.test(inp.value) && /笔记/.test(inp.value), JSON.stringify(inp.value));
+      inp.value = "量子, 纠错";
+      await keyOn(inp, "Enter");
+      await flush();
+      eq("Enter 保存写进存储", JSON.stringify(row(p, "r1").tags), JSON.stringify(["量子", "纠错"]));
+      ok("提示说标签已更新", /标签已更新/.test(toastText(p)), toastText(p));
+      eq("保存后还是这一条，没跳到下一条", cardId(p), "r1");
+      ok("保存后答案还开着", p.q(".rev-back").hidden === false, "存完标签答案收起，等于白看一遍");
+    }
+  }
+
+  /* 3. 超上限要说没进去几条：只报「已更新」等于把丢掉的标签藏起来 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    if (inp) {
+      inp.value = Array.from({ length: 14 }, (_, i) => `t${i}`).join(", ");
+      await keyOn(inp, "Enter");
+      await flush();
+      eq("存储里最多留 12 个", (row(p, "r1").tags || []).length, 12);
+      ok("提示说出几条没进去", /2 个超上限/.test(toastText(p)), toastText(p));
+    }
+  }
+
+  /* 4. 备注是多行文本：保存按钮或 ⌘/Ctrl+Enter 写入，清空要真的能清空 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-note"]');
+    const ta = p.q('[data-act="rev-note-input"]');
+    ok("出现备注输入框", !!ta && ta.tagName === "TEXTAREA", ta ? ta.tagName : "没有 textarea");
+    if (ta) {
+      eq("预填现有备注", ta.value, "旧备注");
+      ta.value = "退相干那段要重读";
+      await keyOn(ta, "Enter", { metaKey: true });
+      await flush();
+      eq("⌘+Enter 保存备注", row(p, "r1").note, "退相干那段要重读");
+      ok("保存后备注就显示在答案里", /退相干/.test(p.q(".rev-back").textContent), p.q(".rev-back").textContent.slice(0, 80));
+    }
+    await tap(p, '[data-act="rev-note"]');
+    const ta2 = p.q('[data-act="rev-note-input"]');
+    const save = p.q('[data-act="rev-save"]');
+    if (ta2 && save) {
+      eq("重开时预填刚保存的备注", ta2.value, "退相干那段要重读");
+      ta2.value = "";
+      await p.click(save);
+      await flush();
+    } else {
+      ok("编辑器里有保存按钮", !!save, "备注编辑器没给出口");
+    }
+    eq("清空备注写回空串", row(p, "r1").note, "");
+    ok("提示说清是清空不是保存了个寂寞", /备注已清空/.test(toastText(p)), toastText(p));
+  }
+
+  /* 5. Esc 取消：一条写请求都不该发出去，存储保持原样 */
+  {
+    const p = await open();
+    const before = JSON.stringify(row(p, "r1").tags);
+    const seen = spyWrites(p);
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    if (inp) {
+      inp.value = "全删了";
+      await keyOn(inp, "Escape");
+      ok("取消后编辑器收起", !p.q('[data-act="rev-tags-input"]'), "Esc 之后输入框还在");
+    }
+    eq("取消没有发写请求", seen.length, 0);
+    eq("存储保持原样", JSON.stringify(row(p, "r1").tags), before);
+  }
+
+  /* 6. 正在打字时数字键归输入框：按「2」不该把这盒排期改掉 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    const boxBefore = row(p, "r1").review.box;
+    if (inp) {
+      inp.value = "2";
+      await keyOn(inp, "2");
+    }
+    eq("输入框里按数字不改排期", row(p, "r1").review.box, boxBefore);
+    eq("输入框里按数字不换卡", cardId(p), "r1");
+  }
+
+  /* 7. 在途重复保存只认第一次：两条 update 打出去，第二条对着旧标签覆盖第一条 */
+  {
+    const p = await open();
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const seen = spyWrites(p, gate);
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    if (inp) {
+      inp.value = "量子, 纠错";
+      await keyOn(inp, "Enter");
+      await keyOn(inp, "Enter");
+    }
+    eq("连按两次 Enter 只发一条写请求", seen.length, 1);
+    release();
+    await tick(30);
+    eq("放行后标签确实写进去了", JSON.stringify(row(p, "r1").tags), JSON.stringify(["量子", "纠错"]));
+  }
+
+  /* 8. 改完标签把这条筛出当前组：得说明白，不能静默换一张卡 */
+  {
+    const p = await open();
+    const chip = [...p.qa("#revfilter .chip")].find((c) => /量子/.test(c.textContent));
+    if (chip) await p.click(chip);
+    else ok("筛选条里有量子这一项", false, "找不到 chip，出组提示这条没法走");
+    await tap(p, '[data-act="reveal"]');
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    ok("筛选状态下也能改标签", !!inp, "筛完这批就没有编辑入口了");
+    if (inp) {
+      inp.value = "历史";
+      await keyOn(inp, "Enter");
+      await flush();
+      ok("说明这条已移出当前筛选", /移出当前筛选/.test(toastText(p)), toastText(p));
+      ok("移出后不再拿这条冒充这批", cardId(p) !== "r1", cardId(p));
+    }
+  }
+
+  /* 9. 输入只当文字：标签里带尖括号也不许变成元素 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    if (inp) {
+      inp.value = '"><img/src=x>, 量子';
+      await keyOn(inp, "Enter");
+      await flush();
+    }
+    ok("没有注入出元素", p.q(".rev-card img") === null, p.q(".rev-card") ? p.q(".rev-card").innerHTML.slice(0, 200) : "没有卡片");
+    ok("尖括号原样当文字", /img\/src=x/.test(p.q(".rev-meta").textContent), p.q(".rev-meta").textContent.slice(0, 120));
+  }
+
+  /* 10. 后台说没保存成功就不报「已更新」：这条在别处已经被删了 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    p.store.clipkeep_items = p.store.clipkeep_items.filter((x) => x.id !== "r1"); // 另一个标签页删掉了它
+    if (inp) {
+      inp.value = "量子";
+      await keyOn(inp, "Enter");
+      await flush();
+    }
+    ok("提示说这条已经不在，没写成功", /不在收藏里/.test(toastText(p)), toastText(p));
+    ok("没摆出一句假的已更新", !/标签已更新/.test(toastText(p)), toastText(p));
+  }
+
+  /* 11. 英文界面下这两个入口也得是英文：文案层漏一条就是界面上一个中文词 */
+  {
+    const p = await open({ clipkeep_prefs: { lang: "en" } });
+    const t = p.q('[data-act="rev-tags"]');
+    const n = p.q('[data-act="rev-note"]');
+    ok("改标签按钮有英文译文", !!t && !CJK.test(t.textContent), t ? t.textContent : "没有按钮");
+    ok("改备注按钮有英文译文", !!n && !CJK.test(n.textContent), n ? n.textContent : "没有按钮");
+    if (t) {
+      await p.click(t);
+      const inp = p.q('[data-act="rev-tags-input"]');
+      ok("英文界面下输入框没有中文占位", !!inp && !CJK.test(inp.placeholder || ""), inp ? inp.placeholder : "没有输入框");
+    }
+  }
+
+  /* 12. 答案开着是「这一张、这一次」的状态：切走再回来不能替你把答案翻开 */
+  {
+    const p = await open();
+    await p.click(p.q('[data-act="reveal"]'));
+    ok("切走前答案是开的", p.q(".rev-back").hidden === false);
+    await p.click(p.q('.tab[data-view="clips"]'));
+    await p.click(p.q('.tab[data-view="review"]'));
+    ok("切回复习时答案重新合上", p.q(".rev-back").hidden === true,
+      "自动翻开等于替用户回忆了一遍，间隔重复就废了");
+  }
+
+  /* 13. 审计：编辑器开着就打分，换卡后不能把上一条打了一半的字带进这一条 */
+  {
+    const p = await open();
+    await tap(p, '[data-act="rev-tags"]');
+    const inp = p.q('[data-act="rev-tags-input"]');
+    ok("编辑器开得起来", !!inp, "点「改标签」没换出输入框");
+    if (inp) {
+      inp.value = "打到一半的字";
+      const before = cardId(p);
+      await keyOn(p.q(".rev-card"), "2"); // 焦点不在输入框时数字键就是打分
+      await flush();
+      ok("打分后换到下一条", cardId(p) !== before, cardId(p));
+      ok("编辑器跟着收起", !p.q('[data-act="rev-tags-input"]'), "换卡了输入框还在");
+      ok("新卡上不带着半截字", !/打到一半的字/.test(p.$("review").textContent),
+         p.$("review").textContent.replace(/\s+/g, " ").slice(0, 200));
+    }
+  }
+}
+
+/* ---------------- v1.13：搜索多关键词与范围 ---------------- */
+
+async function testV113Search() {
+  console.log("\n[3b13] v1.13 搜索：空格取交集，前缀限定字段");
+  const CJK = /[一-鿿]/;
+  const now = Date.now();
+  const mk = (id, o = {}) => ({
+    id, text: o.text || "", note: o.note || "", title: o.title || "",
+    url: o.url || "", tags: o.tags || [], createdAt: now - (o.at || 0) * 1000,
+  });
+  const SEED = [
+    mk("c1", { text: "量子纠错的三种实现", title: "无题", url: "http://q.dev/a" }),
+    mk("c2", { text: "退相干时间很长", note: "量子比特寿命", title: "PRX", url: "http://arxiv.org/q" }),
+    mk("c3", { text: "冗余是纠错的前提", title: "笔记", url: "http://q.dev/b" }),
+    mk("c4", { text: "实验记录", note: "量子", title: "Lab", url: "http://q.dev/c", tags: ["纠错"] }),
+    mk("c5", { text: "作者:量子的故事", title: "怪文", url: "http://q.dev/d" }),
+  ];
+  const clips = async (raw, opts) => {
+    const p = await mountPopup({ clipkeep_items: SEED.map((x) => ({ ...x })) }, opts);
+    if (raw !== undefined) await setSearch(p, raw);
+    return p;
+  };
+  const ids = (p) => p.qa(".item").map((n) => n.dataset.id);
+  /** 功能没做出来时列表是空的，失败详情不能再对着 null 取 innerHTML */
+  const htmlAt = (p, sel) => { const n = p.q(sel); return n ? n.innerHTML.slice(0, 200) : "（没有这个节点）"; };
+  const setSearch = async (p, raw) => {
+    p.$("search").value = raw;
+    await p.fire(p.$("search"), "input");
+    // 首轮渲染可能赶在 load() 之前，读到的是「还没有收藏」那句旧文案：等链跑完再看
+    for (let i = 0; i < 4; i++) await tick(10);
+  };
+
+  /* 1. 空格分词，词间取交集：每个词可以在不同字段命中 */
+  {
+    const p = await clips("量子 纠错");
+    eq("两个词都命中的才留下", JSON.stringify(ids(p)), JSON.stringify(["c1", "c4"]));
+    ok("正文里两个词各标各的",
+      p.qa('.item[data-id="c1"] .item-text mark.hit').length === 2, htmlAt(p, '.item[data-id="c1"] .item-text'));
+  }
+
+  /* 2. 前缀把词限死在一个字段：标题里没有「量子」就不该因为正文命中而留下 */
+  {
+    const p = await clips("标题:量子");
+    eq("标题限定不命中正文", p.qa(".item").length, 0);
+    const q = await clips("标题:PRX");
+    eq("标题限定按标题命中", JSON.stringify(ids(q)), JSON.stringify(["c2"]));
+    const r = await clips("备注:量子");
+    ok("备注限定不拿正文凑数", !ids(r).includes("c1"), JSON.stringify(ids(r)));
+    eq("备注限定命中 c2 c4", JSON.stringify(ids(r)), JSON.stringify(["c2", "c4"]));
+    const s = await clips("标签:纠错");
+    eq("标签限定只看标签", JSON.stringify(ids(s)), JSON.stringify(["c4"]));
+    const t = await clips("站点:arxiv.org");
+    eq("站点限定看的是域名", JSON.stringify(ids(t)), JSON.stringify(["c2"]));
+    const u = await clips("站点:q.dev 量子");
+    // c5 的正文「作者:量子的故事」也含量子，站点同样在 q.dev —— 交集里就该有它
+    eq("站点限定能和别的词叠加", JSON.stringify(ids(u)), JSON.stringify(["c1", "c4", "c5"]));
+  }
+
+  /* 3. 全角冒号、冒号后空格、英文界面下的英文前缀：都是同一种搜索 */
+  {
+    const a = await clips("标题：PRX");
+    eq("全角冒号一样用", JSON.stringify(ids(a)), JSON.stringify(["c2"]));
+    const b = await clips("备注: 量子");
+    eq("冒号后有空格也认", JSON.stringify(ids(b)), JSON.stringify(["c2", "c4"]));
+    const c = await clips("title:PRX");
+    eq("英文前缀 title: 一样用", JSON.stringify(ids(c)), JSON.stringify(["c2"]));
+    const d = await clips("note:量子");
+    eq("英文前缀 note: 一样用", JSON.stringify(ids(d)), JSON.stringify(["c2", "c4"]));
+    const e = await clips("site:arxiv.org");
+    eq("英文前缀 site: 一样用", JSON.stringify(ids(e)), JSON.stringify(["c2"]));
+    const f = await clips("tag:纠错");
+    eq("英文前缀 tag: 一样用", JSON.stringify(ids(f)), JSON.stringify(["c4"]));
+  }
+
+  /* 4. 认不出的前缀当普通文字：不报错、不静默丢，也不许变成筛选 */
+  {
+    const p = await clips("作者:量子");
+    eq("未知前缀按字面量找", JSON.stringify(ids(p)), JSON.stringify(["c5"]));
+    const q = await clips("作者:不存在");
+    ok("没命中时说的是这个词，不是报个格式错", /作者:不存在/.test(q.$("empty").textContent),
+       q.$("empty").textContent.replace(/\s+/g, " "));
+  }
+
+  /* 5. 限定词不许越界高亮：正文没命中就不能把正文里的字涂黄 */
+  {
+    const p = await clips("备注:量子");
+    ok("备注里的命中在备注行标黄", !!p.q('.item[data-id="c2"] .item-note mark.hit'), htmlAt(p, '.item[data-id="c2"]'));
+    ok("正文里同样三个字不能跟着标黄",
+      p.q('.item[data-id="c2"] .item-text mark.hit') === null, "限定到备注的词把正文也涂了");
+  }
+
+  /* 6. 空结果要说清卡在哪个词上 */
+  {
+    const p = await clips("量子 菜谱");
+    ok("点出没命中的那个词", /菜谱/.test(p.$("empty").textContent) && /一条都没命中/.test(p.$("empty").textContent),
+       p.$("empty").textContent.replace(/\s+/g, " "));
+    ok("说错了可不行：量子是有命中的", !/量子[^\n]*一条都没命中/.test(p.$("empty").textContent),
+       p.$("empty").textContent.replace(/\s+/g, " "));
+    const q = await clips("量子 纠错 菜谱 冗余");
+    ok("多个词一起报时按没命中的报", /菜谱/.test(q.$("empty").textContent) && !/冗余/.test(q.$("empty").textContent),
+       q.$("empty").textContent.replace(/\s+/g, " "));
+    const r = await clips("退相干 纠错");
+    ok("每个词都有命中却没同框，得说明是不同条", /同一条|同时/.test(r.$("empty").textContent),
+       r.$("empty").textContent.replace(/\s+/g, " "));
+  }
+
+  /* 7. 字面量匹配不因分词而 loosening：正则元字符还是元字符 */
+  {
+    const p = await clips("(量子|纠错)");
+    eq("正则元字符按字面量处理", p.qa(".item").length, 0);
+    const q = await clips("量子.纠错");
+    eq("点号不是任意字符", q.qa(".item").length, 0);
+  }
+
+  /* 8. 高亮视图共用同一套：交集、前缀、点明的空态 */
+  {
+    const m = async (raw) => {
+      const p = await mountPopup({ clipkeep_highlights: [
+        { id: "m1", url: "http://x/quantum", text: "量子退相干", note: "重点", title: "量子计算入门", createdAt: now },
+        { id: "m2", url: "http://x/quantum", text: "纠错码", note: "量子比特", title: "量子计算入门", createdAt: now - 1 },
+        { id: "m3", url: "http://y/food", text: "红烧肉", note: "", title: "菜谱", createdAt: now - 2 },
+      ] });
+      await p.click(p.q('.tab[data-view="marks"]'));
+      if (raw !== undefined) await setSearch(p, raw);
+      return p;
+    };
+    const a = await m("量子 重点");
+    eq("高亮也按交集筛", JSON.stringify(a.qa(".hl-item").map((n) => n.dataset.hlid)), JSON.stringify(["m1"]));
+    const b = await m("站点:x 量子");
+    eq("站点前缀在高亮视图同样用", JSON.stringify(b.qa(".hl-item").map((n) => n.dataset.hlid)), JSON.stringify(["m1", "m2"]));
+    const c = await m("标题:菜谱");
+    eq("标题前缀限到页面标题", JSON.stringify(c.qa(".hl-item").map((n) => n.dataset.hlid)), JSON.stringify(["m3"]));
+    const d = await m("量子 不存在词");
+    ok("高亮空态也点出没命中的词", /不存在词/.test(d.$("marks").textContent) && /一条都没命中/.test(d.$("marks").textContent),
+       d.$("marks").textContent.replace(/\s+/g, " ").slice(0, 200));
+    const e = await m("量子 重点");
+    ok("正文与批注各标各的词",
+      !!e.q('.hl-item[data-hlid="m1"] .hl-text mark.hit') && !!e.q('.hl-item[data-hlid="m1"] .hl-note mark.hit'),
+      e.qa(".hl-item").map((n) => n.innerHTML.slice(0, 120)).join(" | "));
+    const g = await m("备注:量子");
+    eq("备注前缀在高亮视图同样限字段", JSON.stringify(g.qa(".hl-item").map((n) => n.dataset.hlid)), JSON.stringify(["m2"]));
+    ok("限到备注的词不跑正文里涂黄",
+      g.q('.hl-item[data-hlid="m2"] .hl-text mark.hit') === null && !!g.q('.hl-item[data-hlid="m2"] .hl-note mark.hit'),
+      g.q('.hl-item[data-hlid="m2"]') ? g.q('.hl-item[data-hlid="m2"]').innerHTML.slice(0, 200) : "没有这一行");
+  }
+
+  /* 9. 英文界面下这套说法也得是英文：新加的提示漏翻就是界面上蹦出中文 */
+  {
+    const p = await clips("foo bar", { uiLanguage: "en" });
+    const txt = p.$("empty").textContent.replace(/\s+/g, " ");
+    ok("空态提示没有中文", !CJK.test(txt), txt);
+    ok("提示里点出没命中的词", /foo/.test(txt), txt);
+  }
+
+  /* 10. 审计：只有前缀没有词（「备注:」打一半就回车）不能当成筛选，也不能崩 */
+  {
+    const p = await clips("备注:");
+    eq("只剩前缀时按字面量找", p.qa(".item").length, 0);
+    ok("前缀自己就是那个没命中的词", /备注:/.test(p.$("empty").textContent) && /一条都没命中/.test(p.$("empty").textContent),
+       p.$("empty").textContent.replace(/\s+/g, " "));
+    const q = await clips("备注: 备注:");
+    ok("两个空前缀也不炸", /备注:/.test(q.$("empty").textContent), q.$("empty").textContent.replace(/\s+/g, " "));
+  }
+
+  /* 11. 审计：英文前缀大小写混着写也算同一个前缀 */
+  {
+    const p = await clips("TITLE:PRX");
+    eq("大写 TITLE: 一样是前缀", JSON.stringify(ids(p)), JSON.stringify(["c2"]));
+    const q = await clips("Site:arxiv.org");
+    eq("首字母大写的 Site: 一样是前缀", JSON.stringify(ids(q)), JSON.stringify(["c2"]));
+    const r = await clips("verylongprefix:PRX");
+    eq("超过十个字母的前缀当普通文字", r.qa(".item").length, 0);
+    ok("越界前缀没命中的是整串", /verylongprefix:PRX/.test(r.$("empty").textContent),
+       r.$("empty").textContent.replace(/\s+/g, " "));
+  }
+
+  /* 12. 审计：高亮视图没有标签字段，标签前缀得说「没命中」而不是假装筛完了 */
+  {
+    const p = await mountPopup({ clipkeep_highlights: [
+      { id: "m1", url: "http://x/quantum", text: "量子退相干", note: "重点", title: "量子计算入门", createdAt: now },
+    ] });
+    await p.click(p.q('.tab[data-view="marks"]'));
+    await setSearch(p, "标签:重点");
+    ok("标签前缀在高亮视图如实说没命中", /标签:重点/.test(p.$("marks").textContent) && /一条都没命中/.test(p.$("marks").textContent),
+       p.$("marks").textContent.replace(/\s+/g, " ").slice(0, 200));
+  }
+
+  /* 13. 审计：叠了标签筛选时，「一条都没命中」得说清说的是哪一批 —— 退相干在库里明明有 */
+  {
+    const p = await clips();
+    const chip = p.q('#tags .chip[data-tag="纠错"]');
+    ok("筛选条里有标签 chip", !!chip, "入口换了名字，这条审计没法走");
+    if (!chip) return;
+    await p.click(chip); // 只剩带「纠错」的那条
+    await setSearch(p, "退相干");
+    const txt = p.$("empty").textContent.replace(/\s+/g, " ");
+    eq("筛到空时列表确实一条没有", p.qa(".item").length, 0);
+    ok("说清是这批里没有，不是库里没有", /当前筛选|这批/.test(txt), txt);
+    const q = await clips("退相干");
+    ok("没叠筛选时不用套这句", !/当前筛选/.test(q.$("empty").textContent), q.$("empty").textContent.replace(/\s+/g, " "));
+  }
+
+  /* 14. 这套语法得在界面里撞见：README 不是界面，没人看文档就不知道能写「标题:」 */
+  {
+    const p = await clips("量子");
+    const tip = p.$("search").getAttribute("title") || "";
+    ok("搜索框写清了分词与四个前缀",
+      /标题:/.test(tip) && /备注:/.test(tip) && /标签:/.test(tip) && /站点:/.test(tip),
+      tip || "（搜索框没有提示）");
+    const e = await clips("foo", { uiLanguage: "en" });
+    const en = e.$("search").getAttribute("title") || "";
+    ok("英文界面下这句提示也是英文", !CJK.test(en) && /title:/i.test(en), en);
+  }
+
+  /* 15. 审计：README 从 v1.2 起就写「正文、备注与来源标题里直接标黄」，可标题那一行从来没标过。
+        标题本来就参与匹配（`标题:` 前缀筛的就是它），匹配得上的词在卡片上却一个字都不涂，
+        用户只能看见一条「不知道为什么被筛出来」的收藏。要么把话说对，要么把色标上——这里选后者。 */
+  {
+    const p = await clips("标题:PRX");
+    const link = p.q('.item[data-id="c2"] .item-meta a');
+    ok("标题命中的词标在来源那一行", !!link && /<mark class="hit">PRX<\/mark>/.test(link.innerHTML),
+       link ? link.innerHTML : htmlAt(p, '.item[data-id="c2"] .item-meta'));
+    const q = await clips("量子 无题");
+    const t = q.q('.item[data-id="c1"] .item-meta a');
+    ok("正文与标题各标各的词",
+      !!t && /<mark class="hit">无题<\/mark>/.test(t.innerHTML)
+        && /<mark class="hit">量子<\/mark>/.test(htmlAt(q, '.item[data-id="c1"] .item-text')),
+      (t ? t.innerHTML : "没有来源行") + " | " + htmlAt(q, '.item[data-id="c1"] .item-text'));
+  }
+}
+
 /* ---------------- 4. 清单一致性 ---------------- */
 
 async function testManifests() {
@@ -5539,6 +6045,19 @@ async function testManifests() {
     for (const name of [...inGif].sort()) {
       ok(`${name} 有人抓`, snapped.has(name), `→ 动图要 ${name}，capture.sh 不产这张，合成时直接退出`);
     }
+    /* capture.sh 的 ?f= 名字必须真是 driver.js FRAMES 里的一个模式。
+       名字打错不报错：驱动静默退回 clips 那一帧，PNG 尺寸、颜色都对得上，
+       只有放大看才发现拍的是列表而不是复习卡片——动图骗人比合成失败更难查。 */
+    const drv = fs.readFileSync(path.join(demo, "driver.js"), "utf8");
+    const modes = new Set([...drv.matchAll(/^ {4}([\w-]+): async/gm)].map((m) => m[1]));
+    const wanted = new Set([
+      ...[...cap.matchAll(/for f in ([\w ]+);/g)].flatMap((m) => m[1].split(/\s+/).filter(Boolean)),
+      ...[...cap.matchAll(/shot\.html\?f=([\w-]+)/g)].map((m) => m[1]),
+    ]);
+    ok("驱动帧名解析出了整批弹窗帧", wanted.size > 10, [...wanted].sort().join(","));
+    for (const name of [...wanted].sort()) {
+      ok(`驱动有 ${name} 模式`, modes.has(name), `→ ?f=${name} 没人认，静默拍成 clips 那帧`);
+    }
     // 说明文字开头的带圈序号：①–⑳ 是连续码位，插一帧忘了改号就会出现两个 ⑫ 或跳号
     {
       const marks = [...gif.matchAll(/^\s*\("[\w-]+",\s*"[^"]*",\s*"([\u2460-\u24ff])/gm)].map((m) => m[1]);
@@ -5569,7 +6088,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testV112ReviewFilter, testV112Diag, testV112Audit, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testV112ReviewFilter, testV112Diag, testV112Audit, testV113ReviewEdit, testV113Search, testManifests];
   for (const s of suites) {
     try {
       await s();

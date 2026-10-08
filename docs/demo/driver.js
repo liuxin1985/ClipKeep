@@ -50,6 +50,18 @@
       await until(() => !q(".rev-back").hidden);
       q(".rev-keys").scrollIntoView({ block: "start" });
     },
+    // 答案翻开后卡片上直接改标签：输入框预填的是这条收藏现有的标签，
+    // 焦点已经在里面（点完就能打字），所以这一帧拍的是「正在改」而不是「有个按钮」
+    revedit: async () => {
+      await until(listReady);
+      click(q('.tab[data-view="review"]'));
+      await until(reviewReady);
+      key(" ");
+      await until(() => !q(".rev-back").hidden);
+      click(q('.rev-card [data-act="rev-tags"]'));
+      await until(() => q('[data-act="rev-tags-input"]'));
+      q(".rev-card").scrollIntoView({ block: "end" });
+    },
     marks: async () => {
       await until(listReady);
       click(q('.tab[data-view="marks"]'));
@@ -60,6 +72,16 @@
       await until(() => q("#filterbar [data-kind]"));
       click(q('#filterbar [data-kind="image"]'));
       await until(() => qa("#list .item").length === 1);
+    },
+    // 多关键词取交集 + 字段前缀：查询串自己就把规则写在搜索框里，
+    // 「量子」标在正文和标题、「笔记」限定标签所以一个黄点都不涂——这正是要给看的两件事
+    search: async () => {
+      await until(listReady);
+      const s = q("#search");
+      s.value = "量子 标签:笔记";
+      s.dispatchEvent(new Event("input", { bubbles: true }));
+      await until(() => qa("#list .item").length === 2);
+      await until(() => qa("#list mark.hit").length > 0);
     },
     focus: async () => {
       await until(listReady);

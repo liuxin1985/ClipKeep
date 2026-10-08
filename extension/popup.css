@@ -211,6 +211,17 @@ body.dark .badge-warn { color: #fcd34d; background: rgba(252, 211, 77, .16); }
 .rev-meta .tag { background: var(--accent-soft); color: var(--accent); padding: 1px 7px; border-radius: 999px; }
 .rev-meta a { color: var(--muted); text-decoration: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rev-meta a:hover { color: var(--accent); }
+/* 复习卡片里的内联编辑：输入框占满一行，按钮和提示跟在下面，
+   卡片宽度只有弹窗那么点，挤成两列会把「保存」顶出去 */
+.rev-edit { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.rev-input {
+  flex: 1 1 100%; min-width: 0;
+  font: inherit; font-size: 13px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+}
+.rev-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+textarea.rev-input { resize: vertical; min-height: 56px; line-height: 1.6; }
+.rev-edit-hint { font-size: 11px; color: var(--muted); }
 .rev-reveal {
   margin-top: 16px; width: 100%;
   border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);

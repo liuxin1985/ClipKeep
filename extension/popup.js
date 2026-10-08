@@ -115,6 +115,9 @@
   let selected = new Set(); // 批量操作选中的收藏 id，跨搜索 / 排序保留
   let revTag = ""; // 回顾队列的标签筛选，和列表的 activeTag 各管各的
   let revSite = ""; // 回顾队列的站点筛选
+  let revEdit = ""; // 复习卡片上开着的内联编辑器："tags" / "note" / ""
+  let revEditFor = ""; // 这个编辑器是为哪条收藏开的：换卡就收起，别把上一条打了一半的字带进下一条
+  let revealedFor = ""; // 哪张卡的答案已经翻开：存完标签重渲染不该把它合回去，但换卡、切页要合上
   let diag = null; // 最近一次数据自检的结果
   let diagBusy = false; // 自检在途：连着点「重新自检」不该并排跑两遍
 
@@ -136,16 +139,111 @@
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
+  /**
+   * 搜索前缀 → 字段。中英都认：界面可以切英文，只留中文前缀的话英文界面等于没这功能。
+   * 不在表里的前缀（「作者:」这种）整串当普通文字，既不当错误也不偷偷丢掉。
+   */
+  const SEARCH_FIELDS = {
+    "标题": "title", title: "title",
+    "备注": "note", note: "note",
+    "标签": "tags", tag: "tags", tags: "tags",
+    "站点": "site", site: "site", url: "site",
+  };
+
+  /**
+   * 搜索框解析：空格分词、词间取交集；带前缀的词只在自己那个字段里找。
+   * 「备注: 量子」这种冒号后打空格的写法也认——但下一个词自己带冒号时不吞。
+   */
+  function parseSearch(raw) {
+    const toks = String(raw || "").trim().split(/\s+/).filter(Boolean);
+    const terms = [];
+    for (let i = 0; i < toks.length; i++) {
+      const m = /^([^\s:：]{1,10})[:：]\s*(\S*)$/.exec(toks[i]);
+      const field = m ? SEARCH_FIELDS[m[1].toLowerCase()] || SEARCH_FIELDS[m[1]] : "";
+      if (!field) { terms.push({ field: "", w: toks[i].toLowerCase(), label: toks[i] }); continue; }
+      let w = m[2];
+      if (!w && toks[i + 1] && !/[:：]/.test(toks[i + 1])) { w = toks[i + 1]; i += 1; }
+      if (!w) { terms.push({ field: "", w: toks[i].toLowerCase(), label: toks[i] }); continue; }
+      terms.push({ field, w: w.toLowerCase(), label: `${m[1]}:${w}` });
+    }
+    return terms;
+  }
+
+  /** 一条收藏的六个可搜字段（都已转小写）：不带前缀的词在任一个里命中就算命中 */
+  function clipFields(it) {
+    return {
+      text: String(it.text || "").toLowerCase(),
+      note: String(it.note || "").toLowerCase(),
+      title: String(it.title || "").toLowerCase(),
+      media: mediaOf(it).toLowerCase(),
+      tags: (it.tags || []).join(" ").toLowerCase(),
+      site: String(it.url || "").toLowerCase(),
+    };
+  }
+
+  /** 高亮的可搜字段：没有标签与媒体，站点看的是它所在页面的网址 */
+  function markFields(h) {
+    return {
+      text: String(h.text || "").toLowerCase(),
+      note: String(h.note || "").toLowerCase(),
+      title: String(h.title || "").toLowerCase(),
+      media: "",
+      tags: "",
+      site: String(h.url || "").toLowerCase(),
+    };
+  }
+
+  function termHits(f, t) {
+    if (t.field) return String(f[t.field] || "").indexOf(t.w) >= 0;
+    return Object.keys(f).some((k) => String(f[k] || "").indexOf(t.w) >= 0);
+  }
+
+  /** 这批词全命中才留下：交集不是并集，多打一个词结果只会更少 */
+  function matchesTerms(f, terms) {
+    return terms.every((t) => termHits(f, t));
+  }
+
+  /** 当前搜索里会在「这个字段」上参与匹配的词：限定到别处的词不能跑来涂这里的字 */
+  function hitWords(query, field) {
+    const ws = parseSearch(query)
+      .filter((t) => !t.field || t.field === field)
+      .map((t) => t.w)
+      .filter(Boolean);
+    return [...new Set(ws)].sort((a, b) => b.length - a.length).map(reEsc);
+  }
+
   /** 先按 HTML 转义，再把命中的关键词包进 <mark class="hit"> */
-  function hit(text, query) {
+  function hit(text, query, field) {
     const safe = esc(text);
-    const q = query.trim();
-    if (!q) return safe;
+    const words = hitWords(query, field || "text");
+    if (!words.length) return safe;
     try {
-      return safe.replace(new RegExp(reEsc(esc(q)), "gi"), (m) => `<mark class="hit">${m}</mark>`);
+      return safe.replace(new RegExp(words.join("|"), "gi"), (m) => `<mark class="hit">${m}</mark>`);
     } catch (_) {
       return safe;
     }
+  }
+
+  /**
+   * 搜不到东西时说出卡在哪个词：一个词都没命中的先点名；
+   * 每个词都有人命中却没同框，那是「取交集」的结果，得说明是不同条而不是库里没这个词。
+   */
+  function searchMissHint(terms, fieldList, scoped) {
+    if (!terms.length || !fieldList.length) return "";
+    // 书名号与顿号是中文标点，英文界面要换成引号和逗号，否则整句看着像没翻
+    const en = !!(I18N && I18N.lang() === "en");
+    const quote = (s) => (en ? `"${s}"` : `「${s}」`);
+    const sep = en ? ", " : "、";
+    // 叠了标签 / 类型 / 站点筛选时，「没命中」说的是筛完这批，不是整个库：不加这句就是骗人
+    const tail = scoped ? T("（说的是当前筛选剩下的这批）") : "";
+    const dead = terms.filter((t) => !fieldList.some((f) => termHits(f, t)));
+    const name = (t) => quote(t.label);
+    if (dead.length) {
+      const head = dead.slice(0, 2).map(name).join(sep);
+      return (dead.length > 2 ? T("{0} 等 {1} 个关键词一条都没命中", [head, dead.length])
+                             : T("{0}一条都没命中", [head])) + tail;
+    }
+    return T("这些关键词都各自有命中，只是没出现在同一条里：{0}", [terms.map(name).join(sep)]) + tail;
   }
 
   function fmtDate(ts) {
@@ -447,21 +545,19 @@
     restoreChipFocus(filterEl, keep);
   }
 
-  function filtered() {
-    const q = searchEl.value.trim().toLowerCase();
-    let arr = items.filter((it) => {
+  /** 只过标签 / 类型 / 站点三道筛选，搜索词另算：空结果提示得拿这批当「库里到底有什么」 */
+  function clipsBase() {
+    return items.filter((it) => {
       if (activeTag && !(it.tags || []).includes(activeTag)) return false;
       if (activeKind && kindOf(it) !== activeKind) return false;
       if (activeSite && String(it && it.url ? hostname(it.url) : "") !== activeSite) return false;
-      if (!q) return true;
-      return (
-        (it.text || "").toLowerCase().includes(q) ||
-        (it.note || "").toLowerCase().includes(q) ||
-        (it.title || "").toLowerCase().includes(q) ||
-        mediaOf(it).toLowerCase().includes(q) ||
-        (it.tags || []).some((t) => t.toLowerCase().includes(q))
-      );
+      return true;
     });
+  }
+
+  function filtered() {
+    const terms = parseSearch(searchEl.value);
+    let arr = clipsBase().filter((it) => !terms.length || matchesTerms(clipFields(it), terms));
     arr = arr.slice().sort((a, b) =>
       sortEl.value === "old" ? a.createdAt - b.createdAt : b.createdAt - a.createdAt
     );
@@ -506,13 +602,17 @@
       emptyEl.style.display = "block";
       // 库里明明有东西却一条不显示，提示就得说「是筛选筛掉的」，不能谎称还没有收藏
       const filtering = Boolean(activeTag || activeKind || activeSite || searchEl.value.trim());
+      const hint = searchMissHint(parseSearch(searchEl.value), clipsBase().map(clipFields),
+        Boolean(activeTag || activeKind || activeSite));
       emptyEl.querySelector("p").textContent = items.length === 0 ? T("还没有收藏") : filtering ? T("筛选后没有结果") : T("无匹配结果");
       emptyEl.querySelector("span").textContent =
         items.length === 0
           ? T("在网页上划选文字，点「收藏」即可留存到这里。")
-          : filtering
-            ? T("当前有关键词 / 标签 / 类型 / 站点筛选，去掉一个试试。")
-            : T("换个关键词或标签试试。");
+          : hint
+            ? hint
+            : filtering
+              ? T("当前有关键词 / 标签 / 类型 / 站点筛选，去掉一个试试。")
+              : T("换个关键词或标签试试。");
       return;
     }
     emptyEl.style.display = "none";
@@ -531,10 +631,14 @@
     const longClip = text.length > CLAMP_AT; // 一屏读不完的收藏默认折叠，别把整列顶走
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
     const src = linkable(it.url);
+    // 来源那一行显示的就是标题，标题也参与匹配（`标题:` 前缀筛的正是它）——
+    // 匹配得上的词一个字都不涂，这张卡片看着就像「不知道为什么被筛出来」
+    const titleShown = it.title || (src ? hostname(src) : it.url);
+    const titleHtml = hit(titleShown, q, "title");
     const link = it.url
       ? src
-        ? `<a href="${esc(src)}" target="_blank" rel="noopener" title="${esc(it.title || src)}">${esc(it.title || hostname(src))}</a>`
-        : `<span class="item-src" title="${T("来源不是可点击的地址")}">${esc(it.title || it.url)}</span>`
+        ? `<a href="${esc(src)}" target="_blank" rel="noopener" title="${esc(it.title || src)}">${titleHtml}</a>`
+        : `<span class="item-src" title="${T("来源不是可点击的地址")}">${titleHtml}</span>`
       : "";
     // 收藏正文超过 2 万字会被截断，标记要露出来，否则用户不知道内容不完整
     const trunc = it.truncated
@@ -546,14 +650,14 @@
       ? `<span class="badge-kind">${kindLabel(it.kind)}</span>`
       : "";
     const mediaLink = mediaLinkHtml(it);
-    const note = it.note ? `<div class="item-note">${hit(it.note, q)}</div>` : "";
+    const note = it.note ? `<div class="item-note">${hit(it.note, q, "note")}</div>` : "";
     const on = selected.has(it.id);
     return `
       <div class="item${on ? " selected" : ""}${it.id === focusId ? " focused" : ""}" data-id="${esc(it.id)}">
         <label class="item-sel" title="${T("勾选后可批量删除 / 加标签 / 导出")}">
           <input type="checkbox" data-act="sel" aria-label="${T("选择这条收藏")}"${on ? " checked" : ""} />
         </label>
-        <div class="item-text${longClip ? " is-clamped" : ""}">${hit(text, q)}</div>
+        <div class="item-text${longClip ? " is-clamped" : ""}">${hit(text, q, "text")}</div>
         ${note}
         <div class="item-meta">${trunc}${kindBadge}${tags}${mediaLink}${link}<span>${fmtDate(it.createdAt)}</span></div>
         <div class="item-actions">
@@ -579,16 +683,10 @@
   }
 
   function hlFiltered() {
-    const q = searchEl.value.trim().toLowerCase();
+    const terms = parseSearch(searchEl.value);
     return marks
       .filter((h) => h && h.text)
-      .filter((h) =>
-        !q ||
-        h.text.toLowerCase().includes(q) ||
-        String(h.note || "").toLowerCase().includes(q) ||
-        String(h.title || "").toLowerCase().includes(q) ||
-        String(h.url || "").toLowerCase().includes(q)
-      )
+      .filter((h) => !terms.length || matchesTerms(markFields(h), terms))
       .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   }
 
@@ -609,7 +707,7 @@
   }
 
   function hlNode(h, q) {
-    const note = h.note ? `<div class="hl-note">✎ ${hit(h.note, q)}</div>` : "";
+    const note = h.note ? `<div class="hl-note">✎ ${hit(h.note, q, "note")}</div>` : "";
     const key = COLOR_HEX[h.color] ? h.color : "yellow";
     const bg = COLOR_HEX[key];
     const next = colorName(nextHlColor(h.color));
@@ -617,7 +715,7 @@
       <div class="hl-item" data-hlid="${esc(h.id)}">
         <span class="hl-swatch" style="background:${bg}"></span>
         <div class="hl-body">
-          <div class="hl-text">${hit(h.text, q)}</div>
+          <div class="hl-text">${hit(h.text, q, "text")}</div>
           ${note}
           <div class="hl-meta">${fmtDate(h.createdAt)}</div>
         </div>
@@ -641,7 +739,8 @@
       return;
     }
     if (!groups.length) {
-      marksEl.innerHTML = hlEmpty("🔍", T("无匹配结果"), T("换个关键词试试。"));
+      const hint = searchMissHint(parseSearch(q), marks.filter((h) => h && h.text).map(markFields));
+      marksEl.innerHTML = hlEmpty("🔍", T("无匹配结果"), hint || T("换个关键词试试。"));
       return;
     }
     marksEl.innerHTML = groups
@@ -1061,6 +1160,68 @@
     return `<section class="revfilter" id="revfilter">${tagHtml}${siteHtml}${clear}</section>`;
   }
 
+  /**
+   * 复习卡片答案区的编辑行：复习本来就是整理的时候，看完想打个标签
+   * 还得切回列表翻到那条，动作断在两截。这里只在答案展开后出现。
+   */
+  function revEditHtml(it) {
+    if (revEdit === "tags") {
+      return `<div class="rev-edit">
+        <input class="rev-input" data-act="rev-tags-input" placeholder="${esc(T("标签，逗号分隔"))}" value="${esc((it.tags || []).join(", "))}">
+        <button class="mini-btn" data-act="rev-save">${T("保存")}</button>
+        <span class="rev-edit-hint">${T("Enter 保存，Esc 取消")}</span>
+      </div>`;
+    }
+    if (revEdit === "note") {
+      return `<div class="rev-edit">
+        <textarea class="rev-input" data-act="rev-note-input" rows="3" placeholder="${esc(T("备注"))}">${esc(it.note || "")}</textarea>
+        <button class="mini-btn" data-act="rev-save">${T("保存")}</button>
+        <span class="rev-edit-hint">${T("⌘ / Ctrl + Enter 保存，Esc 取消")}</span>
+      </div>`;
+    }
+    return `<div class="rev-edit">
+      <button class="mini-btn" data-act="rev-tags">${T("改标签")}</button>
+      <button class="mini-btn" data-act="rev-note">${T("改备注")}</button>
+    </div>`;
+  }
+
+  /**
+   * 保存复习卡片上的标签 / 备注：走列表那条一样的写锁与提示口径。
+   * 三件事必须说实话——后台夹掉几个标签、这条会不会被筛出当前这批、有没有真的写进去。
+   */
+  async function saveRevEdit(id) {
+    const kind = revEdit;
+    if (!kind || !id) return;
+    const sel = kind === "tags" ? '[data-act="rev-tags-input"]' : '[data-act="rev-note-input"]';
+    const el = reviewEl.querySelector(sel);
+    if (!el) return;
+    const value = el.value;
+    await withLock(async () => {
+      const res = await send({ type: "clipkeep:update", id, patch: kind === "tags" ? { tags: value } : { note: value } });
+      revEdit = "";
+      revEditFor = "";
+      await load(); // 以存储为准：没写成功就退回存储现状，界面上不留改了一半的标签
+      if (res && res.ok) {
+        let msg;
+        if (kind === "tags") {
+          const drop = Number(res.tagDropped) || 0;
+          msg = drop ? T("标签已更新，{0} 个超上限（最多 {1} 个）没进去", [drop, TAG_MAX]) : T("标签已更新");
+        } else {
+          msg = String(value).trim() ? T("备注已保存") : T("备注已清空");
+        }
+        // 改标签可能把这条筛出「只看这一批」：卡片马上换一张，不说清楚像是界面自己跳的
+        const after = items.find((x) => x.id === id);
+        if (after && revTag && !(after.tags || []).includes(revTag)) msg += T(" · 这条已移出当前筛选（{0}）", [revTag]);
+        else if (after && revSite && String(after.url ? hostname(after.url) : "") !== revSite) msg += T(" · 这条已移出当前筛选（{0}）", [revSite]);
+        toast(msg);
+      } else if (res && res.error === "not_found") {
+        toast(T("这条已经不在收藏里了"));
+      } else {
+        failToast(res, T("保存失败，请重试"));
+      }
+    });
+  }
+
   function renderReview() {
     const { cap } = reviewPrefs();
     const allDue = dueItems();
@@ -1083,6 +1244,10 @@
       return;
     }
     const it = queued[0];
+    // 编辑器是跟着某一张卡开的：打分、换筛选、清除筛选都可能把卡换掉，
+    // 旧卡上打了一半的字留在新卡上，等于把上一条的标签塞进这一条。
+    if (revEdit && revEditFor !== it.id) { revEdit = ""; revEditFor = ""; }
+    if (revealedFor && revealedFor !== it.id) revealedFor = ""; // 换卡就是新一张，答案得重新翻
     const r = ensureReview(it);
     const tags = (it.tags || []).map((t) => `<span class="tag">#${esc(t)}</span>`).join("");
     // 来源与目标地址都要过协议白名单：收藏列表洗过了，回顾卡片也得洗
@@ -1105,6 +1270,7 @@
         <div class="rev-back" hidden>
           ${it.note ? `<div class="rev-note">${esc(it.note)}</div>` : ""}
           <div class="rev-meta">${kindTag}${tags}${link}</div>
+          ${revEditHtml(it)}
         </div>
         <button class="rev-reveal" data-act="reveal">${T("显示答案")}</button>
         <div class="rev-grade" hidden>
@@ -1113,17 +1279,22 @@
           <button class="mini-btn easy" data-act="grade" data-g="2">${T("简单")}</button>
         </div>
       </div>`;
+    // 保存标签 / 备注会重渲染整张卡：答案正开着的话得原样开回去，
+    // 否则改一个字就要重新点一次「显示答案」，整理的动作被拆成两截
+    if (revealedFor === it.id) revealAnswer();
   }
 
   /** 显示答案：按钮和打分区互换，键盘和点击共用这一份 */
   function revealAnswer() {
+    const card = reviewEl.querySelector(".rev-card");
     const back = reviewEl.querySelector(".rev-back");
     const gradeBox = reviewEl.querySelector(".rev-grade");
-    if (!back || !gradeBox) return false;
+    if (!card || !back || !gradeBox) return false;
     const btn = reviewEl.querySelector('[data-act="reveal"]');
     back.hidden = false;
     if (btn) btn.hidden = true;
     gradeBox.hidden = false;
+    revealedFor = card.dataset.id; // 记住是这张卡翻开的，重渲染才敢原样翻开
     return true;
   }
 
@@ -1191,6 +1362,32 @@
     const act = btn.dataset.act;
     if (act === "reveal") revealAnswer();
     else if (act === "grade") await gradeCurrent(id, Number(btn.dataset.g));
+    else if (act === "rev-tags" || act === "rev-note") {
+      revEdit = act === "rev-tags" ? "tags" : "note";
+      revEditFor = id;
+      render();
+      const box = reviewEl.querySelector(act === "rev-tags" ? '[data-act="rev-tags-input"]' : '[data-act="rev-note-input"]');
+      if (box && box.focus) box.focus(); // 点完就得能打字，否则「顺手改个标签」还是要摸鼠标
+    } else if (act === "rev-save") await saveRevEdit(id);
+  });
+
+  /* 复习卡片上的内联编辑：Enter 保存（备注要 ⌘/Ctrl+Enter，回车得能换行）、Esc 取消 */
+  reviewEl.addEventListener("keydown", async (e) => {
+    const act = e.target && e.target.dataset ? e.target.dataset.act : "";
+    if (act !== "rev-tags-input" && act !== "rev-note-input") return;
+    const card = e.target.closest ? e.target.closest(".rev-card") : null;
+    const id = card ? card.dataset.id : "";
+    if (e.key === "Escape") {
+      e.preventDefault();
+      revEdit = "";
+      revEditFor = "";
+      render();
+      return;
+    }
+    const wantsSave = e.key === "Enter" && (act === "rev-tags-input" || e.metaKey || e.ctrlKey);
+    if (!wantsSave) return;
+    e.preventDefault(); // 单行框里的回车不拦掉就是页面向下滚
+    await saveRevEdit(id);
   });
 
   /* 回顾页键盘打分：一条几百次的复习，手手点按钮比键盘慢得多 */
@@ -1468,6 +1665,9 @@
     const tab = e.target.closest(".tab");
     if (!tab) return;
     view = tab.dataset.view;
+    revealedFor = ""; // 切走再回来算重新过一次：答案不该替你开着
+    revEdit = "";
+    revEditFor = "";
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     $("view-clips").hidden = view !== "clips";
     $("view-marks").hidden = view !== "marks";
