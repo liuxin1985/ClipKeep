@@ -35,6 +35,8 @@ snap "w_sel"  "file://$HERE/web_shot.html?m=sel"  900 560
 snap "w_card" "file://$HERE/web_shot.html?m=card" 900 560
 snap "w_ov"   "file://$HERE/web_shot.html?m=ov"   900 560
 snap "w_anchor" "file://$HERE/web_shot.html?m=anchor" 900 620
+# 定位不回那条高亮的修复横幅（页面顶上站着不动，等用户重新划一句）
+snap "w_repair" "file://$HERE/web_shot.html?m=repair" 900 620
 # 弹窗三视图 + 批量全选 + 类型筛选 + 多关键词搜索 + 键盘焦点 + 快捷键帮助 + 回收站明细 + 键盘打分
 # + 回顾按标签筛选 + 复习卡片内改标签 + 深色模式 + 数据自检面板（380x600 就是真 popup 尺寸）
 # 每帧都得进 gen_demo_gif.py 的 FRAMES：一帧一次 Chrome 启动（约 50 秒），不用的模式别顺手加进来

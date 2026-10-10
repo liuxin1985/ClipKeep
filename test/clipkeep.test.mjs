@@ -5943,6 +5943,547 @@ async function testV113Search() {
   }
 }
 
+/* ---------------- 3v14. v1.14 定位不回的高亮：重新划一次换锚点 ---------------- */
+
+async function testV114Repair() {
+  console.log("\n[3v14] v1.14 换锚点修复：批注与颜色原样保留，划错字不接单");
+  const CJK = /[一-鿿]/;
+  const now = Date.now();
+  const URL1 = "http://localhost/repair1";
+  const SENT = "量子比特可以同时处于两种状态";
+  const SENT2 = "退相干时间很短需要纠错码";
+  const BODY = `<p>引言：${SENT}，这是并行性的来源。</p><p>${SENT2}。</p>`;
+  /* 页面上明明有这句话，存的锚点却带着作者早已改掉的上下文 → 重放不回来。
+     这正是「回原页面重新划一次」救得了的那类，也是它必须保住批注与颜色的理由。 */
+  const lost = (id, text, extra) => ({
+    id, url: URL1, title: "页面", text, color: "green", note: "这段是重点", createdAt: now,
+    segs: [{ t: text, pre: "作者已经改掉的上一句", post: "作者已经改掉的下一句" }],
+    ...(extra || {}),
+  });
+
+  const selectText = (c, want) => {
+    const walker = c.w.document.createTreeWalker(c.w.document.body, 4); // SHOW_TEXT
+    let n;
+    while ((n = walker.nextNode())) {
+      const i = n.nodeValue.indexOf(want);
+      if (i < 0) continue;
+      const r = c.w.document.createRange();
+      r.setStart(n, i);
+      r.setEnd(n, i + want.length);
+      const sel = c.w.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      return true;
+    }
+    return false;
+  };
+  const swipe = async (c) => {
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(60);
+  };
+  const barOf = (c) => c.w.document.getElementById("clipkeep-repair");
+  const barShown = (c) => !!barOf(c) && barOf(c).style.display !== "none";
+  // 横幅还没实现时getElementById是null：断言要「红」，不能整段测试崩在这里
+  const barText = (c) => (barOf(c) ? barOf(c).textContent : "");
+  const barChild = (c, sel) => (barOf(c) ? barOf(c).querySelector(sel) : null);
+  const recOf = (c, id) => (c.store.clipkeep_highlights || []).find((h) => h.id === id) || {};
+  const mountLost = async (extra) => {
+    const c = mountContent(URL1, [lost("r1", SENT), lost("r2", SENT2)], BODY, extra);
+    await tick(30);
+    return c;
+  };
+
+  /* 1. 页面接手修复请求，并把「要划哪句」写在横幅上 */
+  {
+    const c = await mountLost();
+    eq("开局一条都标不回来", c.marks().length, 0);
+    const r = await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    ok("页面接了修复请求", !!(r && r.ok === true), JSON.stringify(r));
+    ok("横幅出现", barShown(c), "没有 #clipkeep-repair 或它是隐藏的");
+    const b = barOf(c);
+    ok("横幅带原文，用户知道要划哪一句", !!b && b.textContent.includes(SENT), b ? b.textContent : "无横幅");
+    ok("横幅说清怎么退出", !!b && /Esc/.test(b.textContent), b ? b.textContent : "无横幅");
+  }
+
+  /* 2. 库里没有这个 id 就不接单：横幅一弹，用户会以为修得回来 */
+  {
+    const c = await mountLost();
+    const r = await c.toContent({ type: "clipkeep:repair-arm", id: "ghost", url: URL1 });
+    ok("库里没这条就回 not_found", !!(r && r.ok === false && r.error === "not_found"), JSON.stringify(r));
+    ok("没接单就不弹横幅", !barShown(c));
+  }
+
+  /* 3. 不是这条的来源页：弹窗里的自检结果可能已经过期（用户中途换了页面） */
+  {
+    const c = await mountLost();
+    const r = await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: "http://localhost/elsewhere" });
+    ok("来源页不对就拒绝", !!(r && r.ok === false && r.error === "wrong_page"), JSON.stringify(r));
+    ok("拒绝时不弹横幅", !barShown(c));
+    selectText(c, SENT);
+    await swipe(c);
+    ok("被拒之后划选不该改存储", recOf(c, "r1").segs[0].pre === "作者已经改掉的上一句",
+      JSON.stringify(recOf(c, "r1").segs));
+  }
+
+  /* 4. 划对字：换锚点，id / 批注 / 颜色 / 落点时间 / 地址一律不动 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    ok("划得出那句话", selectText(c, SENT));
+    await swipe(c);
+    ok("页面上标记回来了", c.marks().some((m) => m.dataset.hlid === "r1"),
+      c.marks().map((m) => m.dataset.hlid).join(",") || "一个标记都没有");
+    const rec = recOf(c, "r1");
+    eq("还是同一条（id 不变）", rec.id, "r1");
+    eq("批注原样保留", rec.note, "这段是重点");
+    eq("颜色原样保留", rec.color, "green");
+    eq("落点时间不动", rec.createdAt, now);
+    eq("来源地址不动", rec.url, URL1);
+    ok("锚点换成页面上抓得到的上下文",
+      Array.isArray(rec.segs) && rec.segs.length === 1 && /引言/.test(rec.segs[0].pre),
+      JSON.stringify(rec.segs));
+    ok("提示说清批注与颜色保住了", /修复/.test(c.toastText()) && /批注/.test(c.toastText()), c.toastText());
+    ok("修完横幅收起", !barShown(c));
+    eq("修完把选区撤掉，不留下蓝条", c.w.getSelection().rangeCount, 0);
+    const tb = c.w.document.getElementById("clipkeep-toolbar");
+    ok("修复模式下不弹收藏工具条", !tb || tb.style.display !== "flex",
+      tb ? "工具条 display=" + tb.style.display : "没有工具条");
+    /* 修复的意义是「下次打开还在」：拿修完的存储重新挂一次页面 */
+    const c2 = mountContent(URL1, JSON.parse(JSON.stringify(c.store.clipkeep_highlights)), BODY);
+    await tick(30);
+    ok("重开页面标记还在", c2.marks().some((m) => m.dataset.hlid === "r1"),
+      c2.marks().map((m) => m.dataset.hlid).join(",") || "一个标记都没有");
+  }
+
+  /* 5. 划的字和原来那条对不上 → 拒绝。让批注悄悄挂到别的句子上是骗人 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    selectText(c, SENT2);
+    await swipe(c);
+    ok("对不上就不换锚点", recOf(c, "r1").segs[0].pre === "作者已经改掉的上一句",
+      JSON.stringify(recOf(c, "r1").segs));
+    ok("页面上不该冒出标记", !c.marks().some((m) => m.dataset.hlid === "r1"));
+    ok("还在等着划对的那句", barShown(c));
+    ok("提示说出这条的原文是什么", /量子比特/.test(c.toastText()) && /对不上/.test(c.toastText()), c.toastText());
+  }
+
+  /* 6. 少划一个字仍算同一段：抹平空白后一段包住另一段就行，正文按实际划到的存。
+        （浏览器数空格的方式和我们本来就不完全一致，差一个字符不该把用户挡回去） */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    const walker = c.w.document.createTreeWalker(c.w.document.body, 4);
+    let n;
+    while ((n = walker.nextNode())) {
+      const i = n.nodeValue.indexOf(SENT);
+      if (i < 0) continue;
+      const r = c.w.document.createRange();
+      r.setStart(n, i);
+      r.setEnd(n, i + SENT.length - 1); // 少划最后一个字
+      const sel = c.w.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      break;
+    }
+    await swipe(c);
+    ok("少划一个字仍算同一条", c.marks().some((m) => m.dataset.hlid === "r1"), c.toastText());
+    eq("正文按实际划到的存", recOf(c, "r1").text, SENT.slice(0, SENT.length - 1));
+  }
+
+  /* 7. 写库失败：页面上不能留下一个存储里没有的标记 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    c.store.__failNextSet = true;
+    selectText(c, SENT);
+    await swipe(c);
+    ok("没写成就不该有标记", !c.marks().some((m) => m.dataset.hlid === "r1"),
+      c.marks().map((m) => m.dataset.hlid).join(","));
+    ok("提示说保存没成", /失败|不可用/.test(c.toastText()), c.toastText());
+    ok("锚点保持原样", recOf(c, "r1").segs[0].pre === "作者已经改掉的上一句");
+  }
+
+  /* 8. 等着划选的时候，别处把这条删了 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    c.store.clipkeep_highlights = []; // 另一个标签页删掉了它
+    selectText(c, SENT);
+    await swipe(c);
+    ok("不新增条目", (c.store.clipkeep_highlights || []).length === 0,
+      JSON.stringify(c.store.clipkeep_highlights));
+    ok("提示说这条已经不在了", /不在了/.test(c.toastText()), c.toastText());
+    ok("横幅收起", !barShown(c));
+  }
+
+  /* 9. 连着点两条的修复：只认最后一次，别把上一条的字拿去修下一条 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r2", url: URL1 });
+    ok("横幅跟着换成第二条的原文", barText(c).includes(SENT2), barText(c));
+    selectText(c, SENT);
+    await swipe(c);
+    ok("划第一条的字不该修成第二条", recOf(c, "r1").segs[0].pre === "作者已经改掉的上一句"
+      && recOf(c, "r2").segs[0].pre === "作者已经改掉的上一句", "有锚点被改了");
+    ok("提示说的是对不上，不是修好了", !/已修复/.test(c.toastText()), c.toastText());
+    selectText(c, SENT2);
+    await swipe(c);
+    ok("划对第二条的字才修成", c.marks().some((m) => m.dataset.hlid === "r2"), c.toastText());
+  }
+
+  /* 10. Esc 取消：之后划选就是普通划选 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    c.w.document.dispatchEvent(new c.w.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick(20);
+    ok("Esc 之后横幅收起", !barShown(c));
+    selectText(c, SENT);
+    await swipe(c);
+    ok("取消后划选不改锚点", recOf(c, "r1").segs[0].pre === "作者已经改掉的上一句",
+      JSON.stringify(recOf(c, "r1").segs));
+    const tb = c.w.document.getElementById("clipkeep-toolbar");
+    ok("取消后回到普通划选：工具条照常弹", !!tb && tb.style.display === "flex",
+      tb ? "display=" + tb.style.display : "没有工具条");
+  }
+
+  /* 11. 横幅上的「取消」按钮和 Esc 等价 */
+  {
+    const c = await mountLost();
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    const btn = barChild(c, ".clipkeep-repair-cancel");
+    ok("横幅上有取消按钮", !!btn);
+    if (btn) btn.dispatchEvent(new c.w.MouseEvent("click", { bubbles: true }));
+    await tick(20);
+    ok("点了取消横幅收起", !barShown(c));
+  }
+
+  /* 12. 自检回包要说得出「正在等哪一条」，否则弹窗不知道已经交出去了 */
+  {
+    const c = await mountLost();
+    const before = await c.toContent({ type: "clipkeep:diag" });
+    eq("没 arm 时 armed 是空的", before.diag.armed, "");
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    const r = await c.toContent({ type: "clipkeep:diag" });
+    eq("armed 报出正在修的那条", r.diag.armed, "r1");
+    eq("仍然算定位不回", r.diag.missing.length, 2);
+  }
+
+  /* 13. 跨元素的选区：修完该有两段锚点，别退回整段查找 */
+  {
+    const c = mountContent(URL1, [lost("r1", SENT)],
+      `<p>引言：<strong>${SENT.slice(0, 4)}</strong>${SENT.slice(4)}，这是并行性的来源。</p>`);
+    await tick(30);
+    eq("跨元素开局标不回来", c.marks().length, 0);
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    const d = c.w.document;
+    const strong = d.querySelector("strong");
+    const r = d.createRange();
+    r.setStart(strong.firstChild, 0);
+    r.setEnd(strong.nextSibling, SENT.slice(4).length);
+    const sel = c.w.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    await swipe(c);
+    ok("跨元素也修得回来", c.marks().some((m) => m.dataset.hlid === "r1"), c.toastText());
+    ok("锚点按节点分成两段", (recOf(c, "r1").segs || []).length === 2,
+      JSON.stringify(recOf(c, "r1").segs));
+  }
+
+  /* 14. 英文界面下横幅的提示语要跟着换（原文引用是用户内容，不翻） */
+  {
+    const c = await mountLost({ uiLanguage: "en" });
+    await c.toContent({ type: "clipkeep:repair-arm", id: "r1", url: URL1 });
+    const label = barChild(c, ".clipkeep-repair-label");
+    ok("提示语翻成英文", !!label && !CJK.test(label.textContent), label ? label.textContent : "没有提示语元素");
+    const btn = barChild(c, ".clipkeep-repair-cancel");
+    ok("取消按钮也翻", !!btn && !CJK.test(btn.textContent), btn ? btn.textContent : "没有取消按钮");
+    ok("原文照抄不翻", barText(c).includes(SENT));
+  }
+
+  /* --- 后台：换锚点是一条独立的写入，不能借 updateHighlight 开后门 --- */
+
+  const addOne = async (be, extra) => {
+    await be.send({
+      type: "clipkeep:hl-add",
+      payload: { id: "b1", url: "http://x/1", title: "T", text: "旧的一句", color: "pink", note: "批注", createdAt: now, ...(extra || {}) },
+    });
+    return () => be.store.clipkeep_highlights.find((h) => h.id === "b1") || {};
+  };
+
+  /* 15. 只该动的只有正文 / 锚点 / 标题 */
+  {
+    const be = makeBackend();
+    const at = await addOne(be, { segs: [{ t: "旧的一句", pre: "甲", post: "乙" }] });
+    const r = await be.send({ type: "clipkeep:hl-reanchor", id: "b1", payload: { text: "新的一句", title: "T2" } });
+    ok("后台认识换锚点", !!(r && r.ok === true), JSON.stringify(r));
+    eq("正文换了", at().text, "新的一句");
+    eq("标题跟着页面走", at().title, "T2");
+    eq("id 不变", at().id, "b1");
+    eq("批注不动", at().note, "批注");
+    eq("颜色不动", at().color, "pink");
+    eq("落点时间不动", at().createdAt, now);
+    eq("地址不动", at().url, "http://x/1");
+    /* 旧锚点配新文字是最坏的一种半更新：重放时按旧上下文找新句子，
+       找得回是巧合，找不回用户看到的是「我修了，还是没标回来」 */
+    ok("没给新锚点就把旧锚点删掉", at().segs === undefined, JSON.stringify(at().segs));
+  }
+
+  /* 16. 给了新锚点就换新的 */
+  {
+    const be = makeBackend();
+    const at = await addOne(be, { segs: [{ t: "旧的一句", pre: "甲", post: "乙" }] });
+    await be.send({
+      type: "clipkeep:hl-reanchor", id: "b1",
+      payload: { text: "新的一句", segs: [{ t: "新的一句", pre: "丙", post: "丁" }] },
+    });
+    eq("新锚点写进去了", at().segs[0].pre, "丙");
+  }
+
+  /* 17. 自相矛盾的锚点不能进库（和 cleanSegs 一条口径） */
+  {
+    const be = makeBackend();
+    const at = await addOne(be, { segs: [{ t: "旧的一句", pre: "甲", post: "乙" }] });
+    await be.send({
+      type: "clipkeep:hl-reanchor", id: "b1",
+      payload: { text: "新的一句", segs: [{ t: "跟正文对不上的字", pre: "甲", post: "乙" }] },
+    });
+    eq("正文照样换", at().text, "新的一句");
+    ok("对不上的锚点整份丢掉", at().segs === undefined, JSON.stringify(at().segs));
+  }
+
+  /* 18. 库里没有这条 / 正文是空的：一个字都不该改 */
+  {
+    const be = makeBackend();
+    const r = await be.send({ type: "clipkeep:hl-reanchor", id: "ghost", payload: { text: "字" } });
+    ok("没有这条回 not_found", !!(r && r.ok === false && r.error === "not_found"), JSON.stringify(r));
+    const at = await addOne(be);
+    const blank = await be.send({ type: "clipkeep:hl-reanchor", id: "b1", payload: { text: "   " } });
+    ok("空正文回 invalid", !!(blank && blank.ok === false && blank.error === "invalid"), JSON.stringify(blank));
+    eq("空正文没改坏原记录", at().text, "旧的一句");
+  }
+
+  /* 19. 截断要留痕，也要在不再超长时把痕擦掉 */
+  {
+    const be = makeBackend();
+    const at = await addOne(be);
+    const long = "长".repeat(20500);
+    const r = await be.send({ type: "clipkeep:hl-reanchor", id: "b1", payload: { text: long } });
+    eq("超长正文截到上限", at().text.length, 20000);
+    ok("回包把上限说出来", !!(r && r.truncated && r.limit === 20000), JSON.stringify(r && { t: r.truncated, l: r.limit }));
+    ok("记录里留着截断痕", at().truncated === true);
+    await be.send({ type: "clipkeep:hl-reanchor", id: "b1", payload: { text: "修完只剩一句短的" } });
+    ok("不再超长就把痕擦掉", at().truncated === undefined, JSON.stringify(at().truncated));
+  }
+
+  /* --- 弹窗：自检面板每一行给一个修复入口 --- */
+
+  const diagOk = (armed) => async () => ({
+    ok: true,
+    diag: {
+      page: URL1, stored: 2, placed: 0, armed: armed || "",
+      missing: [
+        { id: "r1", text: SENT, len: SENT.length },
+        { id: "r2", text: SENT2, len: SENT2.length },
+      ],
+    },
+  });
+  const openDiag = async (pageReply, opts) => {
+    const p = await mountPopup({ clipkeep_items: [], clipkeep_highlights: [], clipkeep_prefs: {} }, opts);
+    const sent = [];
+    p.chrome.tabs.sendMessage = async (tabId, msg) => { sent.push(msg); return pageReply ? await pageReply(msg) : undefined; };
+    p.sent = sent;
+    // 按钮还没实现时不能抛异常：后面的断言也得跑完，才能一眼看到全红
+    p.fixBtns = () => p.qa('[data-act="diag-fix"]');
+    p.fixBtn = (i) => p.fixBtns()[i] || { dataset: {}, textContent: "", dispatchEvent: () => {} };
+    p.diagText = () => (p.$("diag") ? p.$("diag").textContent : "没有自检面板");
+    await p.click(p.$("btn-settings"));
+    await tick(40);
+    return p;
+  };
+
+  /* 20. 每条「定位不回」后面跟着一个修复按钮 */
+  {
+    const p = await openDiag(diagOk(""));
+    const btns = p.fixBtns();
+    eq("两条缺失各一个按钮", btns.length, 2);
+    eq("按钮带着要修哪条", p.fixBtn(0).dataset.id, "r1");
+    ok("按钮文案是修复", /修复/.test(p.fixBtn(0).textContent), p.fixBtn(0).textContent);
+    await p.click(p.fixBtn(0));
+    const arm = p.sent.filter((m) => m.type === "clipkeep:repair-arm");
+    eq("点一下交给当前页", arm.length, 1);
+    eq("交出去的是这条", arm[0] ? arm[0].id : "", "r1");
+    eq("连来源页一起交，页面自己核对", arm[0] ? arm[0].url : "", URL1);
+    ok("交完在行上标出正在等划选", /等待|划选/.test(p.diagText()), p.diagText());
+  }
+
+  /* 21. 页面已经 armed 时，按钮位置显示的是状态而不是再点一次 */
+  {
+    const p = await openDiag(diagOk("r1"));
+    ok("面板说得出正在等哪一条", /r1|量子比特/.test(p.diagText()) && /等待|划选/.test(p.diagText()), p.diagText());
+  }
+
+  /* 22. 页面打不通：没有按钮可点，也不该有 */
+  {
+    const p = await openDiag(async () => { throw new Error("no receiver"); });
+    ok("打不通时没有修复按钮", !p.q('[data-act="diag-fix"]'), p.diagText());
+  }
+
+  /* 23. 页面回「不接单」（比如来源页已经换了）：提示要说人话，不能显示成已交给页面 */
+  {
+    const p = await openDiag(diagOk(""));
+    p.chrome.tabs.sendMessage = async () => ({ ok: false, error: "wrong_page" });
+    await p.click(p.fixBtn(0));
+    await tick(20);
+    ok("被拒时提示说清原因", !!p.$("toast") && /页面|重开|刷新/.test(p.$("toast").textContent),
+      p.$("toast") ? p.$("toast").textContent : "没有提示");
+    ok("被拒后不冒充已交接", !/等待/.test(p.diagText()), p.diagText());
+  }
+
+  /* 24. 英文界面：按钮与提示都有译文 */
+  {
+    const p = await openDiag(diagOk(""), { uiLanguage: "en" });
+    eq("英文界面也有两个按钮", p.fixBtns().length, 2);
+    ok("按钮文案翻成英文", !CJK.test(p.fixBtn(0).textContent) && p.fixBtn(0).textContent.trim().length > 0,
+      p.fixBtn(0).textContent);
+  }
+}
+
+/* ---------------- 3v14 审计：修复这条链路里三处「话说得比做的事满」 ---------------- */
+
+async function testV114Audit() {
+  console.log("\n[3v14a] v1.14 审计：横幅要说全话、砍过正文要说少存了、上下文失效不能赖页面跳走、少划一截要说短了");
+  const URL1 = "http://localhost/repair2";
+  const now = Date.now();
+  // 页面上有这句话，存的锚点却带着早已改掉的上下文 → 定位不回，正是修复能救的那类
+  const lost = (id, text) => ({
+    id, url: URL1, title: "页面", text, color: "green", note: "这段是重点", createdAt: now,
+    segs: [{ t: text, pre: "作者已经改掉的上一句", post: "作者已经改掉的下一句" }],
+  });
+  const swipe = async (c) => {
+    c.w.document.dispatchEvent(new c.w.MouseEvent("mouseup", { bubbles: true }));
+    await tick(80);
+  };
+  const barText = (c) => {
+    const b = c.w.document.getElementById("clipkeep-repair");
+    return b ? b.textContent : "";
+  };
+
+  /* 1. 原文超过预览长度时，横幅要给全话。
+        只给前 60 字的话，用户照着横幅划回来的就是残缺的一句，我们却回一句「已修复」——
+        少掉的那一截是他从没划过的，等于我们把高亮悄悄改短了。 */
+  {
+    const LONG = "这是一段很长很有用的原文".repeat(9); // 135 字，早就越过 60 字预览
+    const c = mountContent(URL1, [lost("a1", LONG)], `<p>引言：${LONG}，收尾。</p>`);
+    await tick(30);
+    await c.toContent({ type: "clipkeep:repair-arm", id: "a1", url: URL1 });
+    ok("横幅把整句原文都给出来", barText(c).includes(LONG), `横幅只有 ${barText(c).length} 字`);
+    const walker = c.w.document.createTreeWalker(c.w.document.body, 4);
+    let n;
+    while ((n = walker.nextNode())) {
+      const i = n.nodeValue.indexOf(LONG);
+      if (i < 0) continue;
+      const r = c.w.document.createRange();
+      r.setStart(n, i);
+      r.setEnd(n, i + LONG.length);
+      const sel = c.w.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      break;
+    }
+    await swipe(c);
+    const rec = (c.store.clipkeep_highlights || []).find((h) => h.id === "a1") || {};
+    eq("照横幅划回来就该是整句", rec.text, LONG);
+  }
+
+  /* 2. 修完仍被后台砍短（正文超 2 万字）：提示要说「少存了一截」，不能只报 ✓。
+        新建高亮早就懂这条（v1.9 加的痕），修复这条路是同一份数据，没理由换个说法。 */
+  {
+    const HUGE = "甲".repeat(21000);
+    const c = mountContent(URL1, [lost("a2", HUGE)], `<p>${HUGE}</p>`);
+    await tick(30);
+    await c.toContent({ type: "clipkeep:repair-arm", id: "a2", url: URL1 });
+    const walker = c.w.document.createTreeWalker(c.w.document.body, 4);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n.nodeValue.indexOf(HUGE) < 0) continue;
+      const r = c.w.document.createRange();
+      r.setStart(n, n.nodeValue.indexOf(HUGE));
+      r.setEnd(n, n.nodeValue.indexOf(HUGE) + HUGE.length);
+      const sel = c.w.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      break;
+    }
+    await swipe(c);
+    const rec = (c.store.clipkeep_highlights || []).find((h) => h.id === "a2") || {};
+    eq("入库正文被砍到上限", String(rec.text || "").length, 20000);
+    ok("提示承认少存了一截", /截断|超过/.test(c.toastText()) && /20000/.test(c.toastText()), c.toastText());
+  }
+
+  /* 3. 页面的扩展上下文已经失效（扩展刚更新完）：弹窗不能说成「页面多半跳走了」。
+        用户照那句去刷新页面反而修不好——该重开的是扩展的页面上下文，得说准。 */
+  {
+    const p = await mountPopup({ clipkeep_items: [], clipkeep_highlights: [], clipkeep_prefs: {} });
+    const pageReply = async () => ({
+      ok: true,
+      diag: {
+        page: URL1, stored: 1, placed: 0, armed: "",
+        missing: [{ id: "a3", text: "量子比特可以同时处于两种状态", len: 13 }],
+      },
+    });
+    p.chrome.tabs.sendMessage = async (tabId, msg) => {
+      if (msg.type === "clipkeep:diag") return pageReply();
+      return { ok: false, error: "storage_unavailable" };
+    };
+    await p.click(p.$("btn-settings"));
+    await tick(40);
+    const btn = p.q('[data-act="diag-fix"]');
+    ok("缺失行上有修复按钮", !!btn);
+    if (btn) {
+      await p.click(btn);
+      await tick(20);
+      const t = p.$("toast") ? p.$("toast").textContent : "没有提示";
+      ok("说清是扩展在这个页面失效了", /失效|更新/.test(t) && /刷新页面/.test(t), t);
+      ok("不把责任推给「页面跳走了」", !/跳走/.test(t), t);
+      ok("没接手就不显示等待状态", !/等待/.test(p.$("diag").textContent), p.$("diag").textContent);
+    }
+  }
+
+  /* 4. 少划了一截也算「对得上」，但这条高亮的正文真的变短了：提示得说出来。
+        互不包含才拒绝，是这轮定的口径；可一旦收下更短的那一段，库里存的就不再是原来那句。
+        只回一句「已修复 ✓」，用户会以为一切照旧，不会想到要再划一次。 */
+  {
+    const FULL = "量子比特可以同时处于两种状态的叠加态";
+    const SHORT = FULL.slice(0, FULL.length - 3); // 尾巴上「叠加态」没划到
+    const c = mountContent(URL1, [lost("a4", FULL)], `<p>引言：${FULL}，收尾。</p>`);
+    await tick(30);
+    await c.toContent({ type: "clipkeep:repair-arm", id: "a4", url: URL1 });
+    const walker = c.w.document.createTreeWalker(c.w.document.body, 4);
+    let n;
+    while ((n = walker.nextNode())) {
+      const i = n.nodeValue.indexOf(FULL);
+      if (i < 0) continue;
+      const r = c.w.document.createRange();
+      r.setStart(n, i);
+      r.setEnd(n, i + SHORT.length);
+      const sel = c.w.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      break;
+    }
+    await swipe(c);
+    const rec = (c.store.clipkeep_highlights || []).find((h) => h.id === "a4") || {};
+    eq("照用户实际划的范围入库", rec.text, SHORT);
+    eq("批注一个字的没动", rec.note, "这段是重点");
+    const t = c.toastText();
+    ok("修好了，但要说这次划的比原文短", /短/.test(t), t);
+    ok("不能只报一句已修复就当没事", !/^已修复[：:]/.test(t), t);
+  }
+}
+
 /* ---------------- 4. 清单一致性 ---------------- */
 
 async function testManifests() {
@@ -5997,7 +6538,7 @@ async function testManifests() {
   const bg = src("background.js");
   const content = src("content.js");
   const front = src("popup.js") + content;
-  const pageDirect = ["clipkeep:diag"]; // popup → 当前页面，不经过后台
+  const pageDirect = ["clipkeep:diag", "clipkeep:repair-arm"]; // popup → 当前页面，不经过后台
   const frontTypes = new Set(typesIn(front));
   const bgTypes = new Set(typesIn(bg));
   for (const t of frontTypes) {
@@ -6058,6 +6599,21 @@ async function testManifests() {
     for (const name of [...wanted].sort()) {
       ok(`驱动有 ${name} 模式`, modes.has(name), `→ ?f=${name} 没人认，静默拍成 clips 那帧`);
     }
+    /* 页面侧那几帧同理：web_shot.html?m= 的名字必须真是 web_driver.js 认的模式。
+       名字打错同样不报错——驱动会退回默认的 sel 分支，拍出来是一张划选图，
+       而 GIF 里的说明写的是「修复横幅」，图不对文。 */
+    const webDrv = fs.readFileSync(path.join(demo, "web_driver.js"), "utf8");
+    const webModes = new Set([...webDrv.matchAll(/mode === "([\w-]+)"/g)].map((m) => m[1]));
+    webModes.add("sel"); // mode 缺省时走它：驱动最后一截就是划选那一帧
+    const webWanted = new Set([...cap.matchAll(/web_shot\.html\?m=([\w-]+)/g)].map((m) => m[1]));
+    ok("网页驱动帧名解析出了整批页面帧", webWanted.size >= 4, [...webWanted].sort().join(","));
+    for (const name of [...webWanted].sort()) {
+      ok(`网页驱动有 ${name} 模式`, webModes.has(name), `→ ?m=${name} 没人认，静默拍成划选那帧`);
+    }
+    /* 修复横幅要在截图里站着不动，页面那头得能收到弹窗发来的 repair-arm。
+       网页桩不认这条消息的话，驱动只能拍一张「什么都没有」的页面当门面对照。 */
+    ok("网页桩认得换锚点写入", /clipkeep:hl-reanchor/.test(web),
+      "→ 演示页里修完存储没变，重放那一步只能假装有");
     // 说明文字开头的带圈序号：①–⑳ 是连续码位，插一帧忘了改号就会出现两个 ⑫ 或跳号
     {
       const marks = [...gif.matchAll(/^\s*\("[\w-]+",\s*"[^"]*",\s*"([\u2460-\u24ff])/gm)].map((m) => m[1]);
@@ -6088,7 +6644,7 @@ async function testManifests() {
 /* ---------------- run ---------------- */
 
 (async () => {
-  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testV112ReviewFilter, testV112Diag, testV112Audit, testV113ReviewEdit, testV113Search, testManifests];
+  const suites = [testBackground, testConcurrency, testShortcut, testPopup, testRestoreSafety, testReviewGuard, testMarksOverview, testTrash, testContent, testHighlightSync, testAudit, testActivity, testDedupe, testV15Audit, testExportTemplate, testMediaClips, testHeatDrill, testV16Audit, testColorPicker, testBatchOps, testReviewKeys, testKindSiteFilter, testListKeys, testOverlappingMarks, testTrashDetail, testV17Audit, testV18Audit, testV19Audit, testV110Anchor, testV111FlatAnchor, testV111I18n, testV112ReviewFilter, testV112Diag, testV112Audit, testV113ReviewEdit, testV113Search, testV114Repair, testV114Audit, testManifests];
   for (const s of suites) {
     try {
       await s();

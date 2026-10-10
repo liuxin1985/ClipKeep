@@ -220,6 +220,11 @@
 
   function onMouseUp() {
     setTimeout(() => {
+      // 正等着用户重新划那一句：这一下归修复流程，收藏工具条不能弹出来抢同一份选区
+      if (repair) {
+        if (getSelectionText()) tryRepairSelection();
+        return;
+      }
       const text = getSelectionText();
       if (!text || text.length < 1) {
         hideToolbar();
@@ -755,6 +760,113 @@
     }
   }
 
+  /* ---------- 定位不回时的「换锚点」修复 ---------- */
+
+  /*
+   * 弹窗自检发现某条高亮在这页找不回来了，用户在面板上点「修复」，这里就等着他
+   * 在原页面上把那句话重新划一遍：划对就把锚点换成页面上现抓的这份，
+   * 正文 / 标题跟着更新，id、批注、颜色、落点时间、来源地址一个都不动。
+   * 划的是别的话就拒绝并说明——让批注悄悄挂到另一句上等于骗人。
+   */
+  let repair = null; // { id, text }：正在等划选的那条
+  let repairBar = null;
+
+  function buildRepairBar() {
+    const el = document.createElement("div");
+    el.id = NS + "-repair";
+    el.className = NS + "-repair";
+    el.style.display = "block";
+    const label = document.createElement("div");
+    label.className = NS + "-repair-label";
+    label.textContent = T("在原文里重新划一句话就能修好，批注和颜色都会保留（按 Esc 取消）");
+    const quote = document.createElement("div");
+    quote.className = NS + "-repair-quote";
+    const btn = document.createElement("button");
+    btn.className = NS + "-repair-cancel";
+    btn.type = "button";
+    btn.textContent = T("取消");
+    btn.addEventListener("click", () => disarmRepair());
+    el.appendChild(label);
+    el.appendChild(quote);
+    el.appendChild(btn);
+    document.documentElement.appendChild(el);
+    return el;
+  }
+
+  function showRepairBar() {
+    if (!repair) return;
+    if (!repairBar || !document.documentElement.contains(repairBar)) repairBar = buildRepairBar();
+    // 原文是用户自己的字，一个字都不翻，而且要给全：只给前 60 字的话，
+    // 用户照着横幅划回来的是残缺一句，我们却回「已修复」——那不等于悄悄把高亮改短了
+    repairBar.children[1].textContent = T("这条的原文：") + String(repair.text);
+  }
+
+  function disarmRepair() {
+    repair = null;
+    if (repairBar) {
+      repairBar.remove();
+      repairBar = null;
+    }
+  }
+
+  /** 弹窗把修复交给这一页：库里得有这条，而且必须真是它的来源页 */
+  async function armRepair(id, url) {
+    const list = await getHighlights();
+    if (!list) return { ok: false, error: "storage_unavailable" };
+    const hl = list.find((h) => h && String(h.id) === String(id));
+    if (!hl) return { ok: false, error: "not_found" };
+    // 面板里的自检结果可能已经过期（用户中途跳了页），拿来源页再核一次
+    if (normUrl(url) !== normUrl(location.href)) return { ok: false, error: "wrong_page" };
+    repair = { id: String(hl.id), text: String(hl.text || "") };
+    showRepairBar();
+    return { ok: true, id: repair.id };
+  }
+
+  /** 划完这一下：把这条高亮的锚点换成页面上现抓的这份 */
+  async function tryRepairSelection() {
+    const target = repair;
+    const sel = currentRange();
+    if (!target || !sel) return;
+    // 抹平空白后一段包住另一段就算同一句：少划一个标点、浏览器多算一个空格，
+    // 都不该把用户挡回去；换成另一句话（互不包含）才是真的划错了
+    const want = flatText(target.text);
+    const got = flatText(sel.text);
+    if (!want || !got || (got.indexOf(want) < 0 && want.indexOf(got) < 0)) {
+      toast(T("划的字和这条的原文对不上：原文是「{0}」。页面把文字改了的话，直接重新划一条高亮就行",
+        [String(target.text).slice(0, DIAG_PREVIEW)]));
+      return;
+    }
+    // 必须在包 mark 之前抓锚点，包完节点边界就变了（和新建高亮同一条规矩）
+    let segs = captureSegs(sel.range);
+    if (segs && flatText(segs.map((s) => s.t).join("")) !== got) segs = null;
+    const text = segs ? segs.map((s) => s.t).join("") : sel.text;
+    const res = await hlWrite({
+      type: "clipkeep:hl-reanchor",
+      id: target.id,
+      payload: { text, segs, title: document.title || "" },
+    });
+    if (res === "gone") {
+      disarmRepair();
+      toast(T(GONE_HINT)); // 别处删掉了：没什么可修的，横幅留着只会让人继续划
+      return;
+    }
+    if (!res) return; // hlWrite 已经把「保存失败」说出来了，横幅留着让人再划一次
+    await applyHighlights();
+    disarmRepair();
+    const s = window.getSelection();
+    if (s) s.removeAllRanges(); // 蓝条留着会盖住刚标回来的颜色
+    // 修没修好要看页面上到底标回来没有：存储写了不等于这条回得来（比如页面结构整个换了）
+    if (!marksFor(target.id).length) {
+      toast(T("已保存，但这条在这页还是定位不回，可能要重开页面再修一次"));
+      return;
+    }
+    // 后台砍过正文、或者这次划的本来就比原文短，都得当场说出来：新建高亮是这条口径，
+    // 修复写的是同一份数据，没理由换个说法。「已修复 ✓」听着像一切照旧，人就不会再划一次
+    if (res.truncated) toast(T("已修复（正文超过 {0} 字，已截断）：批注和颜色都保留", [res.limit]));
+    else if (flatText(text) !== want) toast(T("已修复（这次划的范围比原文短一截）：批注和颜色都保留"));
+    else toast(T("已修复：批注和颜色都保留 ✓"));
+  }
+
   /**
    * 数据自检用的「重放一遍看谁回不来」：只算不改。
    * 每次现读存储，不用页面里已画好的标记当事实——自检要回答的正是「库里记的和页面对不对得上」，
@@ -778,7 +890,7 @@
       // 预览只给面板看，条数之外再带上原文长度：导出文件里靠它说「丢了多大一块」，不必搬正文
       else missing.push({ id: String(hl.id || ""), text: String(hl.text).slice(0, DIAG_PREVIEW), len: String(hl.text).length });
     }
-    return { page: pageKey, stored: mine.length, placed, missing };
+    return { page: pageKey, stored: mine.length, placed, missing, armed: repair ? String(repair.id) : "" };
   }
 
   // 点击已有高亮：编辑批注 / 删除
@@ -952,6 +1064,12 @@
         if (readerRoot) exitReader();
         else enterReader();
         sendResponse({ ok: true });
+      } else if (msg.type === "clipkeep:repair-arm") {
+        // 弹窗点了「修复」：这一页开始等用户重新划那一句。异步应答，理由和 diag 一样
+        armRepair(msg.id, msg.url)
+          .then((r) => sendResponse(r))
+          .catch(() => sendResponse({ ok: false, error: "repair_arm_failed" }));
+        return true;
       } else if (msg.type === "clipkeep:diag") {
         // 异步应答：读存储要等，监听器必须 return true 才能把这条消息的通道留住。
         // 算不出来一律回 not-ok：弹窗宁可显示「这个页面打不通」，也不要拿半截数字当真
@@ -994,6 +1112,10 @@
       card = null;
     }
     if (readerRoot) return; // 正文已按旧语言排好，重放标记只会半中半英，不如等用户自己退出
+    if (repair) {
+      repairBar = null; // 横幅也是浮层：正等着划选时换了语言，拆了重建才换得过来话
+      showRepairBar();
+    }
     applyHighlights(); // 标记的批注提示是建标记时拼死的字符串，重放一次才会换语言
   }
 
@@ -1012,6 +1134,7 @@
       closeCard();
       hideToolbar();
       exitReader();
+      disarmRepair(); // 修复也是浮层的一种：Esc 得能把它收回去，之后划选就是普通划选
     }
   });
 

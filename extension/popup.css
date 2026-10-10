@@ -283,6 +283,9 @@ body.dark mark.hit { background: #78350f; color: #fde68a; }
 .diag p:last-child { margin-bottom: 0; }
 /* 三类附注要盖住上面那条 .diag p 的颜色，选择器得带上 p，否则权重不够 */
 .diag p.diag-sub { padding-left: 10px; color: var(--muted); }
+/* 定位不回那行的修复入口：按钮贴在预览末尾，等待状态用更小的字，不再给第二个按钮 */
+.diag p.diag-sub [data-act="diag-fix"] { margin-left: 6px; }
+.diag .diag-wait { margin-left: 6px; font-size: 11px; color: var(--accent); }
 .diag p.diag-note { color: var(--muted); }
 .diag p.diag-warn { color: #d97706; }
 

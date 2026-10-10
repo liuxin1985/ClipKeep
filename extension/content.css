@@ -179,3 +179,46 @@
 }
 .clipkeep-hl:hover { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.4); }
 .clipkeep-hl.has-note { border-bottom: 2px dotted rgba(0, 0, 0, 0.35); }
+
+/* 换锚点修复：常驻视口顶部的横幅，划选时不压住正文 */
+.clipkeep-repair {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483646;
+  max-width: min(560px, calc(100vw - 28px));
+  background: rgba(17, 24, 39, 0.94);
+  color: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+.clipkeep-repair-label { color: #e5e7eb; }
+.clipkeep-repair-quote {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 243, 163, 0.16);
+  color: #ffe9a8;
+  font-weight: 600;
+  word-break: break-word;
+  /* 横幅给的是整句原文，长起来没边：超出就自己滚，不能把用户的正文压在下头 */
+  max-height: 26vh;
+  overflow-y: auto;
+}
+.clipkeep-repair-cancel {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: transparent;
+  color: #fff;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.clipkeep-repair-cancel:hover { background: rgba(255, 255, 255, 0.14); }

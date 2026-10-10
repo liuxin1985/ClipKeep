@@ -1811,6 +1811,9 @@
       return {
         state: "ok",
         url,
+        // 页面自己报的来源地址：修复时要带回去给它核对，标签页地址可能带 #片段、也可能已经跳走
+        pageUrl: String(d.page || ""),
+        armed: String(d.armed || ""),
         stored: Number(d.stored) || 0,
         placed: Number(d.placed) || 0,
         missing: (Array.isArray(d.missing) ? d.missing : []).map((m) => ({
@@ -1894,6 +1897,55 @@
     diagEl.innerHTML = diagHtml();
   }
 
+  /**
+   * 把「修复这一条」交给页面：页面那头开始等用户重新划那一句，划对才换锚点。
+   * 来源地址取页面自己在自检里报的那一份——标签页地址可能带 #片段，也可能在我们
+   * 看面板的这几秒里跳走，让页面拿它和当前地址对一次，比弹窗单方面假设更安全。
+   */
+  async function armRepairFix(id) {
+    const pg = diag && diag.page;
+    if (!pg || pg.state !== "ok") {
+      toast(T("这个页面打不通，先刷新页面再重开面板"));
+      return;
+    }
+    let res = null;
+    try {
+      const tabs = await API.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id) {
+        toast(T("找不到当前标签页，修不了"));
+        return;
+      }
+      res = await API.tabs.sendMessage(tab.id, { type: "clipkeep:repair-arm", id, url: pg.pageUrl || pg.url });
+    } catch (_) {
+      res = null; // 页面已经跳走 / 扩展刚更新：和「不接单」一样按没接手处理
+    }
+    if (res && res.ok) {
+      // 先本地画成「等着划选」：页面那侧的 armed 要下一次自检才回得来，
+      // 但用户已经知道下一步该干什么了，按钮再留一秒都只是让人怀疑有没有点上
+      diag.page.armed = String(id);
+      renderDiag();
+      toast(T("回到页面，把上面那句原话重新划一遍就能修好，批注和颜色都会保留"));
+    } else if (res && res.error === "not_found") {
+      toast(T("这条已经不在了，修不了（可能刚被删掉）"));
+    } else if (res && res.error === "storage_unavailable") {
+      // 是扩展在这个页面的上下文断了（刚更新过），不是页面跳走了：说错了用户会白刷一次页
+      toast(T("这个页面里的 ClipKeep 已经失效（扩展刚更新过），刷新页面后再修"));
+    } else {
+      toast(T("页面没接手：多半是已经跳走了，刷新页面或重开面板再试"));
+    }
+  }
+
+  if (diagEl) {
+    diagEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest && e.target.closest('[data-act="diag-fix"]');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      if (!id) return;
+      await armRepairFix(id);
+    });
+  }
+
   function diagHtml() {
     const d = diag;
     if (!d) return `<p class="diag-note">${T("还没跑过自检。")}</p>`;
@@ -1927,7 +1979,13 @@
       } else {
         rows.push(`<p class="diag-row${pg.missing.length ? " diag-warn" : ""}">`
           + T("当前页面：存 {0} 条高亮，标出 {1} 条，{2} 条定位不回", [pg.stored, pg.placed, pg.missing.length]) + `</p>`);
-        pg.missing.slice(0, DIAG_ROWS_MAX).forEach((m) => rows.push(`<p class="diag-sub">→ ${esc(m.text || m.id)}</p>`));
+        pg.missing.slice(0, DIAG_ROWS_MAX).forEach((m) => rows.push(`<p class="diag-sub">→ ${esc(m.text || m.id)}`
+          // 每一条定位不回都给一个修复入口：回原页面重新划一句就能换锚点，
+          // 批注和颜色都不用用户手动重打。已经在等划选的那条换成状态，不给第二个按钮
+          + (pg.armed === m.id
+            ? ` <span class="diag-wait">${T("等待页面里划选")}</span>`
+            : ` <button class="mini-btn" type="button" data-act="diag-fix" data-id="${esc(m.id)}">${T("修复")}</button>`)
+          + `</p>`));
         if (pg.missing.length > DIAG_ROWS_MAX) rows.push(`<p class="diag-sub">${T("另有 {0} 条没有列出", [pg.missing.length - DIAG_ROWS_MAX])}</p>`);
       }
     } else {

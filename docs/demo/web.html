@@ -73,6 +73,19 @@
           if (h) Object.assign(h, msg.patch);
           return done({ ok: true });
         }
+        if (msg.type === "clipkeep:hl-reanchor") {
+          // 和真后台一条口径：只换正文 / 锚点 / 标题，id、批注、颜色、落点时间一个都不动
+          const h = store.clipkeep_highlights.find((x) => x.id === msg.id);
+          if (!h) return done({ ok: false, error: "not_found" });
+          const p = msg.payload || {};
+          const next = { ...h, text: String(p.text || h.text) };
+          if (p.title !== undefined) next.title = String(p.title);
+          if (p.segs) next.segs = p.segs;
+          else delete next.segs; // 旧锚点配新正文比没锚点更糟：照抄后台那条规矩
+          store.clipkeep_highlights = store.clipkeep_highlights.map((x) => (x === h ? next : x));
+          fireChanged({ clipkeep_highlights: 1 }); // 广播一次，content.js 才会按新锚点重放
+          return done({ ok: true, id: h.id });
+        }
         if (msg.type === "clipkeep:add") {
           if (msg.payload) store.clipkeep_items.push(msg.payload); // 桩也要真的落库，截图才不是空列表
           return done({ ok: true, items: store.clipkeep_items });
@@ -84,6 +97,14 @@
     },
     tabs: { async query() { return [{ id: 1 }]; }, async sendMessage() { return { ok: true }; } },
   };
+  /* 弹窗 → 本页那两类消息（自检、修复交接）在真扩展里走 tabs.sendMessage。
+     截图页没有第二个上下文，直接把消息递给页面脚本自己注册的监听器，
+     走的仍是 content.js 里那个 msg.type 分支，横幅不是手工拼出来的假 DOM。 */
+  window.__ckAskPage = (msg) => new Promise((resolve) => {
+    const fn = listeners[listeners.length - 1];
+    if (!fn) { resolve(undefined); return; }
+    fn(msg, { tab: { id: 1 } }, resolve);
+  });
 })();
 </script>
 <script src="content.js"></script>

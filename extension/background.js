@@ -562,6 +562,40 @@ function updateHighlight(id, patch) {
   });
 }
 
+/**
+ * 换锚点：把「页面上定位不回的那一条」按用户重新划的选区改回能定位的样子。
+ * 只许动正文 / 锚点 / 标题三样，id、批注、颜色、落点时间、来源地址一个都不碰——
+ * 用户修的是「这一段在页面的哪里」，不是「这一段叫什么颜色、旁边写了什么注释」。
+ * 也不借 updateHighlight 开后门：那个白名单只给改批注改颜色用，一旦能写 text，
+ * 任何页面都能把自己库里的正文换成别的字，风险不是一个量级。
+ */
+function reanchorHighlight(id, payload) {
+  const p = payload || {};
+  const text = String(p.text || "").trim();
+  if (!text) return Promise.resolve({ ok: false, error: "invalid" });
+  const safeText = text.slice(0, MAX_TEXT);
+  const segs = cleanSegs(p.segs, safeText);
+  const truncated = text.length > safeText.length;
+  return mutateHl((list) => {
+    const idx = list.findIndex((x) => x && x.id === id);
+    if (idx === -1) return { result: { ok: false, error: "not_found" } };
+    const next = { ...list[idx], text: safeText };
+    if (p.title !== undefined) next.title = String(p.title);
+    // 旧锚点配新正文是最坏的一种半更新：重放时拿旧上下文去找新句子，找得回是巧合。
+    // 所以新锚点没过 cleanSegs 校验也得把旧的删掉——宁可不标，也不能标错地方。
+    if (segs) next.segs = segs;
+    else delete next.segs;
+    if (truncated) next.truncated = true;
+    else delete next.truncated; // 这次划短了，痕就得擦掉，不能让用户以为正文被砍过
+    list[idx] = next;
+    return {
+      write: true,
+      list,
+      result: { ok: true, id: next.id, count: list.length, ...(truncated ? { truncated: true, limit: MAX_TEXT } : {}) },
+    };
+  });
+}
+
 function deleteHighlight(id) {
   return mutateHl(async (list) => {
     const idx = list.findIndex((x) => x && x.id === id);
@@ -985,6 +1019,9 @@ if (API.runtime && API.runtime.onMessage) {
             break;
           case "clipkeep:hl-update":
             sendResponse(await updateHighlight(msg.id, msg.patch || {}));
+            break;
+          case "clipkeep:hl-reanchor":
+            sendResponse(await reanchorHighlight(msg.id, msg.payload || {}));
             break;
           case "clipkeep:hl-delete":
             sendResponse(await deleteHighlight(msg.id));

@@ -338,6 +338,22 @@
     "，可撤销"                                     : ", can be undone",
     "，覆盖会保留本地 {0} 条高亮 / 批注"                    : ", overwriting keeps the {0} local highlights / notes",
     "（说的是当前筛选剩下的这批）" : "(this is about the subset left by your current filters)",
+    /* v1.14 换锚点修复 */
+    "在原文里重新划一句话就能修好，批注和颜色都会保留（按 Esc 取消）" : "Select that sentence again on the page to fix it — your note and its color are kept (Esc to cancel)",
+    "这条的原文：" : "This highlight reads: ",
+    "划的字和这条的原文对不上：原文是「{0}」。页面把文字改了的话，直接重新划一条高亮就行" : "That selection doesn't match what this highlight says: \"{0}\". If the page rewrote it, just highlight the new wording as a fresh one.",
+    "已修复：批注和颜色都保留 ✓" : "Anchor repaired ✓ note and color kept",
+    "已修复（正文超过 {0} 字，已截断）：批注和颜色都保留" : "Anchor repaired (text over {0} characters was cut) — note and color kept",
+    "已修复（这次划的范围比原文短一截）：批注和颜色都保留" : "Anchor repaired — this selection is a little shorter than the original, so that is what got saved (note and color kept)",
+    "已保存，但这条在这页还是定位不回，可能要重开页面再修一次" : "Saved, but this one still can't be located on this page — reload the page and repair it again",
+    "等待页面里划选" : "Waiting for a selection on the page",
+    "修复" : "Repair",
+    "这个页面打不通，先刷新页面再重开面板" : "This page can't be reached — reload it, then reopen the panel",
+    "找不到当前标签页，修不了" : "No active tab, so there's nothing to repair",
+    "回到页面，把上面那句原话重新划一遍就能修好，批注和颜色都会保留" : "Back on the page: select that exact sentence again and it will be repaired — note and color are kept",
+    "这条已经不在了，修不了（可能刚被删掉）" : "This highlight is gone, so there's nothing to repair (it may have just been deleted)",
+    "页面没接手：多半是已经跳走了，刷新页面或重开面板再试" : "The page didn't accept the request — it has probably navigated away. Reload the page or reopen the panel.",
+    "这个页面里的 ClipKeep 已经失效（扩展刚更新过），刷新页面后再修" : "ClipKeep's context on this page is dead (the extension was just updated) — reload the page, then repair it",
   };
 
   const SUPPORTED = ["auto", "zh", "en"];

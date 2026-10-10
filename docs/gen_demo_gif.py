@@ -150,8 +150,9 @@ FRAMES = [
     ("p_revedit", "example.com/quantum-computing", "⑮ 答案里顺手改标签与备注：Enter 保存，Esc 取消，不用退回列表再点开"),
     ("p_trash", "example.com/quantum-computing", "⑯ 回收站明细：撤销只管最近一批，想捞哪一条就点哪一条"),
     ("p_diag", "example.com/quantum-computing", "⑰ 数据自检：哪条高亮定位不回、几条被字数上限砍短，一屏看完还能导出诊断"),
-    ("p_dark", "example.com/quantum-computing", "⑱ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
-    ("p_en", "example.com/quantum-computing", "⑲ 界面语言跟着偏好走：中文 / English 用的是同一份代码"),
+    ("w_repair", "example.com/quantum-computing", "⑱ 定位不回的那条，点「修复」回原页面重新划一句就换好锚点：批注和颜色一个字都不动"),
+    ("p_dark", "example.com/quantum-computing", "⑲ 深色模式一键切换，Chrome / Edge / Safari 同一份代码"),
+    ("p_en", "example.com/quantum-computing", "⑳ 界面语言跟着偏好走：中文 / English 用的是同一份代码"),
 ]
 
 
